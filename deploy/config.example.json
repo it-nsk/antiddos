@@ -1,0 +1,4 @@
+{
+  "log_file": "/var/log/nginx/access.log",
+  "start_position": "end"
+}

@@ -1,0 +1,20 @@
+[Unit]
+Description=AntiDDoS access log analyzer
+After=local-fs.target
+
+[Service]
+Type=simple
+User=antiddos
+Group=antiddos
+ExecStart=/usr/local/bin/antiddos run --config /etc/antiddos/config.json
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+StateDirectory=antiddos
+
+[Install]
+WantedBy=multi-user.target
