@@ -1,0 +1,15 @@
+# Local binary produced by: go build -o antiddos ./cmd/antiddos
+/antiddos
+/config.local.json
+/PROJECT_CONTEXT.md
+
+# Real logs and generated runtime data must remain local.
+*.log
+*.log.*
+/runtime/
+
+# Tests and replay tools are local-only for now.
+/internal/config/config_test.go
+/internal/reader/follower_test.go
+/tools/replay_nginx_log.php
+/tools/test_reader_live.sh
