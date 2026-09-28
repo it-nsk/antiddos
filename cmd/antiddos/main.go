@@ -10,7 +10,9 @@ import (
 	"syscall"
 
 	"github.com/it-nsk/antiddos/internal/config"
+	"github.com/it-nsk/antiddos/internal/parser"
 	"github.com/it-nsk/antiddos/internal/reader"
+	"github.com/it-nsk/antiddos/internal/request"
 )
 
 const lineBufferSize = 256
@@ -29,7 +31,7 @@ func main() {
 
 func execute(ctx context.Context, args []string, logger *slog.Logger) error {
 	if len(args) == 0 || args[0] != "run" {
-		return fmt.Errorf("usage: antiddos run [--config PATH] [--from-start] [--print-lines]")
+		return fmt.Errorf("usage: antiddos run [--config PATH] [--from-start] [--print-lines] [--print-events]")
 	}
 
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
@@ -37,6 +39,7 @@ func execute(ctx context.Context, args []string, logger *slog.Logger) error {
 	configPath := flags.String("config", config.DefaultPath, "path to JSON configuration")
 	fromStart := flags.Bool("from-start", false, "override start_position and read the existing file from the beginning")
 	printLines := flags.Bool("print-lines", false, "print every complete input line; intended only for development")
+	printEvents := flags.Bool("print-events", false, "print every parsed request event; intended only for development")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -70,8 +73,15 @@ func execute(ctx context.Context, args []string, logger *slog.Logger) error {
 
 	logger.Info("service started", "log_file", cfg.LogFile, "start_position", cfg.StartPosition)
 	var linesRead uint64
+	var parsedRequests uint64
+	var parseFailures uint64
 	defer func() {
-		logger.Info("service stopped", "lines_read", linesRead)
+		logger.Info(
+			"service stopped",
+			"lines_read", linesRead,
+			"parsed_requests", parsedRequests,
+			"parse_failures", parseFailures,
+		)
 	}()
 
 	for line := range lines {
@@ -79,7 +89,40 @@ func execute(ctx context.Context, args []string, logger *slog.Logger) error {
 		if *printLines {
 			fmt.Fprintln(os.Stdout, line)
 		}
+
+		event, err := parser.ParseNginx(line)
+		if err != nil {
+			parseFailures++
+			if *printEvents {
+				logger.Warn("request parse failed", "error", err)
+			}
+			continue
+		}
+		parsedRequests++
+		if *printEvents {
+			logRequestEvent(logger, event)
+		}
+		// The next milestone passes event to the Rule Engine here.
 	}
 
 	return <-readerDone
+}
+
+func logRequestEvent(logger *slog.Logger, event request.Event) {
+	responseBytes := any("-")
+	if event.ResponseBytes != nil {
+		responseBytes = *event.ResponseBytes
+	}
+
+	logger.Info(
+		"request parsed",
+		"timestamp", event.Timestamp,
+		"ip", event.IP,
+		"method", event.Method,
+		"path", event.Path,
+		"raw_query", event.RawQuery,
+		"status", event.Status,
+		"response_bytes", responseBytes,
+		"user_agent", event.UserAgent,
+	)
 }

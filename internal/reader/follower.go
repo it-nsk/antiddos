@@ -17,6 +17,7 @@ import (
 const (
 	defaultEventBuffer       = 256
 	defaultReconcileInterval = time.Second
+	defaultRotationGrace     = 10 * time.Second
 )
 
 type StartPosition string
@@ -30,18 +31,31 @@ type Options struct {
 	Path              string
 	StartPosition     StartPosition
 	ReconcileInterval time.Duration
+	RotationGrace     time.Duration
 }
 
-// Follower owns the watched file, its offset, and any incomplete final line.
+type logStream struct {
+	file    *os.File
+	offset  int64
+	pending []byte
+}
+
+type drainingStream struct {
+	stream     *logStream
+	closeAfter time.Time
+}
+
+// Follower owns the active file and old file descriptors being drained after
+// rotation. All mutable stream state is accessed by the Run goroutine.
 // It is not safe to call Run more than once.
 type Follower struct {
 	path              string
 	reconcileInterval time.Duration
+	rotationGrace     time.Duration
 	logger            *slog.Logger
 	watcher           *fsnotify.Watcher
-	file              *os.File
-	offset            int64
-	pending           []byte
+	active            *logStream
+	draining          []*drainingStream
 }
 
 func Open(options Options, logger *slog.Logger) (*Follower, error) {
@@ -53,6 +67,9 @@ func Open(options Options, logger *slog.Logger) (*Follower, error) {
 	}
 	if options.ReconcileInterval <= 0 {
 		options.ReconcileInterval = defaultReconcileInterval
+	}
+	if options.RotationGrace <= 0 {
+		options.RotationGrace = defaultRotationGrace
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -66,6 +83,7 @@ func Open(options Options, logger *slog.Logger) (*Follower, error) {
 	follower := &Follower{
 		path:              filepath.Clean(options.Path),
 		reconcileInterval: options.ReconcileInterval,
+		rotationGrace:     options.RotationGrace,
 		logger:            logger,
 		watcher:           watcher,
 	}
@@ -91,7 +109,7 @@ func Open(options Options, logger *slog.Logger) (*Follower, error) {
 func (f *Follower) Run(ctx context.Context, lines chan<- string) error {
 	defer f.close()
 
-	if err := f.readAvailable(ctx, lines); err != nil {
+	if err := f.readAvailable(ctx, lines, f.active); err != nil {
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -135,7 +153,10 @@ func (f *Follower) Run(ctx context.Context, lines chan<- string) error {
 }
 
 func (f *Follower) reconcile(ctx context.Context, lines chan<- string) error {
-	if err := f.readAvailable(ctx, lines); err != nil {
+	if err := f.drainRotated(ctx, lines); err != nil {
+		return err
+	}
+	if err := f.readAvailable(ctx, lines, f.active); err != nil {
 		return err
 	}
 
@@ -147,43 +168,46 @@ func (f *Follower) reconcile(ctx context.Context, lines chan<- string) error {
 		return fmt.Errorf("stat log path %q: %w", f.path, err)
 	}
 
-	if f.file == nil {
+	if f.active == nil {
 		if err := f.openCurrent(false); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
-		return f.readAvailable(ctx, lines)
+		return f.readAvailable(ctx, lines, f.active)
 	}
 
-	openInfo, err := f.file.Stat()
+	openInfo, err := f.active.file.Stat()
 	if err != nil {
 		return fmt.Errorf("stat open log %q: %w", f.path, err)
 	}
 
 	if os.SameFile(openInfo, pathInfo) {
-		if pathInfo.Size() < f.offset {
-			f.logger.Warn("log file was truncated; restarting at beginning", "path", f.path, "old_offset", f.offset, "new_size", pathInfo.Size())
-			if _, err := f.file.Seek(0, io.SeekStart); err != nil {
+		if pathInfo.Size() < f.active.offset {
+			f.logger.Warn("log file was truncated; restarting at beginning", "path", f.path, "old_offset", f.active.offset, "new_size", pathInfo.Size())
+			if _, err := f.active.file.Seek(0, io.SeekStart); err != nil {
 				return fmt.Errorf("seek truncated log %q: %w", f.path, err)
 			}
-			f.offset = 0
-			f.dropPending("truncation")
+			f.active.offset = 0
+			f.dropPending(f.active, "truncation")
 		}
-		return f.readAvailable(ctx, lines)
+		return f.readAvailable(ctx, lines, f.active)
 	}
 
-	if err := f.readAvailable(ctx, lines); err != nil {
+	if err := f.readAvailable(ctx, lines, f.active); err != nil {
 		return err
 	}
-	f.dropPending("rotation")
-	if err := f.file.Close(); err != nil {
-		return fmt.Errorf("close rotated log %q: %w", f.path, err)
-	}
-	f.file = nil
-
+	old := f.active
 	if err := f.openCurrent(false); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			f.logger.Warn("new log disappeared during rotation; waiting for creation", "path", f.path)
+			return nil
+		}
 		return err
 	}
-	return f.readAvailable(ctx, lines)
+	f.beginRotationDrain(old)
+	return f.readAvailable(ctx, lines, f.active)
 }
 
 func (f *Follower) openCurrent(seekEnd bool) error {
@@ -201,25 +225,29 @@ func (f *Follower) openCurrent(seekEnd bool) error {
 		}
 	}
 
-	f.file = file
-	f.offset = offset
-	f.pending = nil
+	f.active = &logStream{
+		file:   file,
+		offset: offset,
+	}
 	f.logger.Info("log file opened", "path", f.path, "offset", offset)
 	return nil
 }
 
-func (f *Follower) readAvailable(ctx context.Context, lines chan<- string) error {
-	if f.file == nil {
+func (f *Follower) readAvailable(ctx context.Context, lines chan<- string, stream *logStream) error {
+	if stream == nil {
 		return nil
 	}
 
 	buffer := make([]byte, 64*1024)
 	for {
-		read, err := f.file.Read(buffer)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		read, err := stream.file.Read(buffer)
 		if read > 0 {
-			f.offset += int64(read)
-			f.pending = append(f.pending, buffer[:read]...)
-			if err := f.emitCompleteLines(ctx, lines); err != nil {
+			stream.offset += int64(read)
+			stream.pending = append(stream.pending, buffer[:read]...)
+			if err := f.emitCompleteLines(ctx, lines, stream); err != nil {
 				return err
 			}
 		}
@@ -228,7 +256,7 @@ func (f *Follower) readAvailable(ctx context.Context, lines chan<- string) error
 			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("read log %q at offset %d: %w", f.path, f.offset, err)
+			return fmt.Errorf("read log %q at offset %d: %w", stream.file.Name(), stream.offset, err)
 		}
 		if read == 0 {
 			return nil
@@ -236,38 +264,88 @@ func (f *Follower) readAvailable(ctx context.Context, lines chan<- string) error
 	}
 }
 
-func (f *Follower) emitCompleteLines(ctx context.Context, lines chan<- string) error {
+func (f *Follower) emitCompleteLines(ctx context.Context, lines chan<- string, stream *logStream) error {
 	for {
-		newline := bytes.IndexByte(f.pending, '\n')
+		newline := bytes.IndexByte(stream.pending, '\n')
 		if newline < 0 {
 			return nil
 		}
 
-		line := f.pending[:newline]
+		line := stream.pending[:newline]
 		if len(line) > 0 && line[len(line)-1] == '\r' {
 			line = line[:len(line)-1]
 		}
 
 		select {
 		case lines <- string(line):
-			f.pending = f.pending[newline+1:]
+			stream.pending = stream.pending[newline+1:]
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
 }
 
-func (f *Follower) dropPending(reason string) {
-	if len(f.pending) > 0 {
-		f.logger.Warn("discarding incomplete line", "path", f.path, "bytes", len(f.pending), "reason", reason)
+func (f *Follower) beginRotationDrain(old *logStream) {
+	closeAfter := time.Now().Add(f.rotationGrace)
+	f.draining = append(f.draining, &drainingStream{
+		stream:     old,
+		closeAfter: closeAfter,
+	})
+	f.logger.Info(
+		"log file rotated; draining old inode",
+		"path", f.path,
+		"offset", old.offset,
+		"grace", f.rotationGrace,
+	)
+}
+
+func (f *Follower) drainRotated(ctx context.Context, lines chan<- string) error {
+	remaining := f.draining[:0]
+	for index, draining := range f.draining {
+		previousOffset := draining.stream.offset
+		if err := f.readAvailable(ctx, lines, draining.stream); err != nil {
+			f.draining = append(remaining, f.draining[index:]...)
+			return err
+		}
+		// EOF only describes the current end: the writer may still hold this
+		// inode. Require a full quiet period after every observed append.
+		now := time.Now()
+		if draining.stream.offset != previousOffset {
+			draining.closeAfter = now.Add(f.rotationGrace)
+		}
+		if now.Before(draining.closeAfter) {
+			remaining = append(remaining, draining)
+			continue
+		}
+
+		f.dropPending(draining.stream, "rotation grace expired")
+		if err := draining.stream.file.Close(); err != nil {
+			f.logger.Error("close drained log", "path", draining.stream.file.Name(), "error", err)
+			continue
+		}
+		f.logger.Info("rotated log drained and closed", "path", draining.stream.file.Name(), "offset", draining.stream.offset)
 	}
-	f.pending = nil
+	clear(f.draining[len(remaining):])
+	f.draining = remaining
+	return nil
+}
+
+func (f *Follower) dropPending(stream *logStream, reason string) {
+	if len(stream.pending) > 0 {
+		f.logger.Warn("discarding incomplete line", "path", stream.file.Name(), "bytes", len(stream.pending), "reason", reason)
+	}
+	stream.pending = nil
 }
 
 func (f *Follower) close() {
-	if f.file != nil {
-		if err := f.file.Close(); err != nil {
+	if f.active != nil {
+		if err := f.active.file.Close(); err != nil {
 			f.logger.Error("close log file", "path", f.path, "error", err)
+		}
+	}
+	for _, draining := range f.draining {
+		if err := draining.stream.file.Close(); err != nil {
+			f.logger.Error("close rotated log file", "path", draining.stream.file.Name(), "error", err)
 		}
 	}
 	if err := f.watcher.Close(); err != nil {
