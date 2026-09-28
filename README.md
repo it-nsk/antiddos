@@ -11,9 +11,15 @@ firewall.
 - direct and systemd-based execution;
 - reading new lines through fsnotify/inotify;
 - retaining incomplete lines until they are complete;
-- basic truncate and rename/create handling;
+- truncate and graceful rename/create rotation handling;
 - live mode from EOF and historical mode from the beginning;
+- parsing Nginx requests into typed events;
 - graceful shutdown on SIGINT and SIGTERM.
+
+Rotation keeps old file descriptors until EOF and 10 seconds without newly
+read bytes. Later writes can be missed; this timeout does not confirm that
+Nginx has processed USR1. Events from old and new files may arrive out of
+timestamp order.
 
 Current launch commands, until the installer is implemented:
 
@@ -22,6 +28,9 @@ Current launch commands, until the installer is implemented:
 cp deploy/config.example.json config.local.json
 # Set log_file in config.local.json, then run:
 go run ./cmd/antiddos run --config config.local.json
+
+# Show parsed events while developing
+go run ./cmd/antiddos run --config config.local.json --print-events
 
 # Run the installed systemd service
 sudo systemctl start antiddos
@@ -51,7 +60,7 @@ belongs in the ignored `config.local.json`; systemd uses
 
 ## TODO
 
-- [ ] Nginx parser and typed `RequestEvent`.
+- [x] Nginx parser and typed `RequestEvent`.
 - [ ] Homepage rule and exact sliding window.
 - [ ] IP and User-Agent grouping.
 - [ ] Structured detections and severity levels.

@@ -8,8 +8,11 @@
 *.log.*
 /runtime/
 
-# Tests and replay tools are local-only for now.
+# Tests, demos, and replay tools are local-only for now.
+/cmd/antiddos/main_test.go
 /internal/config/config_test.go
+/internal/parser/nginx_test.go
 /internal/reader/follower_test.go
+/scripts/demo_live.sh
 /tools/replay_nginx_log.php
 /tools/test_reader_live.sh
