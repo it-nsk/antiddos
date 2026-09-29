@@ -1,4 +1,18 @@
 {
   "log_file": "/var/log/nginx/access.log",
-  "start_position": "end"
+  "start_position": "end",
+  "engine": {
+    "max_pending_events": 100000,
+    "rules": [
+      {
+        "id": "homepage",
+        "window": "5s",
+        "threshold": 5,
+        "suspicious_threshold": 3,
+        "groupings": [
+          {"id": "by_ip", "fields": ["ip"]}
+        ]
+      }
+    ]
+  }
 }
