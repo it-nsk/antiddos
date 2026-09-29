@@ -2,68 +2,67 @@
 
 Monitoring and blocking suspicious activity on your webserver
 
-A Linux service written in Go for analyzing Nginx access logs. The current MVP
-runs in dry-run mode: it reads the log but does not block requests or modify the
-firewall.
+Go service for analyzing Nginx access logs. The current MVP works in dry-run
+mode and does not block requests or modify the firewall.
 
 ## Implemented
 
-- direct and systemd-based execution;
-- reading new lines through fsnotify/inotify;
-- retaining incomplete lines until they are complete;
-- truncate and graceful rename/create rotation handling;
-- live mode from EOF and historical mode from the beginning;
-- parsing Nginx requests into typed events;
+- direct and systemd execution;
+- continuous Nginx log reading through fsnotify/inotify;
+- partial-line, truncate, and rename/create rotation handling;
+- parsing log lines into typed request events;
+- exact sliding-window analysis using log timestamps;
+- configurable window and severity thresholds;
+- IP, User-Agent, and combined groupings;
+- structured dry-run detections;
 - graceful shutdown on SIGINT and SIGTERM.
 
-Rotation keeps old file descriptors until EOF and 10 seconds without newly
-read bytes. Later writes can be missed; this timeout does not confirm that
-Nginx has processed USR1. Events from old and new files may arrive out of
-timestamp order.
-
-Current launch commands, until the installer is implemented:
+## Run
 
 ```shell
-# Run directly
 cp deploy/config.example.json config.local.json
-# Set log_file in config.local.json, then run:
+# Set log_file in config.local.json.
 go run ./cmd/antiddos run --config config.local.json
 
-# Show parsed events while developing
-go run ./cmd/antiddos run --config config.local.json --print-events
+# Historical replay
+go run ./cmd/antiddos run --config config.local.json --from-start
 
-# Run the installed systemd service
+# Installed systemd service
 sudo systemctl start antiddos
 systemctl status antiddos
 journalctl -u antiddos -f
 ```
 
-## Requirements
+Requires Linux amd64, Go 1.26.8, and read access to the configured log.
 
-- Linux amd64;
-- Go 1.26.8;
-- read access to the Nginx access log.
+## Rule configuration
 
-## Configuration
+The template is [deploy/config.example.json](deploy/config.example.json).
+Systemd uses `/etc/antiddos/config.json`.
 
-```json
-{
-  "log_file": "/var/log/nginx/access.log",
-  "start_position": "end"
-}
-```
+The current rule counts `GET /` requests, including query parameters, in the
+exact `(t-W, t]` window:
 
-The configuration template is available at
-[deploy/config.example.json](deploy/config.example.json). Local configuration
-belongs in the ignored `config.local.json`; systemd uses
-`/etc/antiddos/config.json`.
+- `window` sets `W`;
+- `threshold` sets the violation threshold `N`;
+- `suspicious_threshold` sets the earlier warning threshold.
+
+The fifth request triggers when `N=5`. Detections are emitted when a threshold
+is crossed, while all observed requests continue to be counted.
+
+Groupings use one or more fields: `ip`, `user_agent`, `method`, `path`, and
+`status`. Each rule and grouping has independent window state.
+
+`allowed_lateness` is optional and defaults to `0s` for immediate processing.
 
 ## TODO
 
-- [x] Nginx parser and typed `RequestEvent`.
-- [ ] Homepage rule and exact sliding window.
-- [ ] IP and User-Agent grouping.
-- [ ] Structured detections and severity levels.
+- [x] Daemon and systemd unit.
+- [x] Continuous Nginx log reader.
+- [x] Nginx parser and typed request events.
+- [x] Homepage rule and exact sliding window.
+- [x] Configurable and combined groupings.
+- [x] Structured detections and severity levels.
 - [ ] Metrics and SQLite persistence.
 - [ ] Statistics CLI.
 - [ ] Installation script.
