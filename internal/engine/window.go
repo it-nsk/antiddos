@@ -5,8 +5,11 @@ import "time"
 const compactWindowHead = 1024
 
 type timestampWindow struct {
-	timestamps []time.Time
-	head       int
+	timestamps  []time.Time
+	head        int
+	key         GroupKey
+	expiresAt   time.Time
+	expiryIndex int
 }
 
 func (window *timestampWindow) prune(cutoff time.Time) {

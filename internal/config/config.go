@@ -13,25 +13,25 @@ import (
 )
 
 const DefaultPath = "/etc/antiddos/config.json"
+const DefaultDatabasePath = "/var/lib/antiddos/antiddos.sqlite"
 
 const (
-	defaultWindow           = 5 * time.Second
-	defaultThreshold        = 5
-	defaultSuspicious       = 3
-	defaultAllowedLateness  = 0
-	defaultMaxPendingEvents = 100_000
+	defaultWindow            = 5 * time.Second
+	defaultThreshold         = 5
+	defaultSuspicious        = 3
+	defaultLiveEventLateness = 30 * time.Second
 )
 
 type Config struct {
 	LogFile       string
+	DatabasePath  string
 	StartPosition string
 	Engine        EngineConfig
 }
 
 type EngineConfig struct {
-	AllowedLateness  time.Duration
-	MaxPendingEvents int
-	Rules            []RuleConfig
+	LiveEventLateness time.Duration
+	Rules             []RuleConfig
 }
 
 type RuleConfig struct {
@@ -49,14 +49,14 @@ type GroupingConfig struct {
 
 type rawConfig struct {
 	LogFile       string          `json:"log_file"`
+	DatabasePath  string          `json:"database_path"`
 	StartPosition string          `json:"start_position"`
 	Engine        json.RawMessage `json:"engine"`
 }
 
 type rawEngineConfig struct {
-	AllowedLateness  *string         `json:"allowed_lateness"`
-	MaxPendingEvents *int            `json:"max_pending_events"`
-	Rules            []rawRuleConfig `json:"rules"`
+	LiveEventLateness *string         `json:"live_event_lateness"`
+	Rules             []rawRuleConfig `json:"rules"`
 }
 
 type rawRuleConfig struct {
@@ -99,6 +99,12 @@ func Load(path string) (Config, error) {
 	if !filepath.IsAbs(raw.LogFile) {
 		return Config{}, fmt.Errorf("config %q: log_file must be an absolute path", path)
 	}
+	if raw.DatabasePath == "" {
+		raw.DatabasePath = DefaultDatabasePath
+	}
+	if !filepath.IsAbs(raw.DatabasePath) {
+		return Config{}, fmt.Errorf("config %q: database_path must be an absolute path", path)
+	}
 	if raw.StartPosition == "" {
 		raw.StartPosition = "end"
 	}
@@ -113,6 +119,7 @@ func Load(path string) (Config, error) {
 
 	return Config{
 		LogFile:       filepath.Clean(raw.LogFile),
+		DatabasePath:  filepath.Clean(raw.DatabasePath),
 		StartPosition: raw.StartPosition,
 		Engine:        engineConfig,
 	}, nil
@@ -132,29 +139,21 @@ func parseEngine(data json.RawMessage) (EngineConfig, error) {
 	if err := decoder.Decode(&raw); err != nil {
 		return EngineConfig{}, fmt.Errorf("decode engine: %w", err)
 	}
-	if raw.MaxPendingEvents == nil {
-		return EngineConfig{}, fmt.Errorf("engine.max_pending_events is required")
-	}
 	if len(raw.Rules) == 0 {
 		return EngineConfig{}, fmt.Errorf("engine.rules must contain at least one rule")
 	}
 
-	allowedLateness := time.Duration(defaultAllowedLateness)
-	if raw.AllowedLateness != nil {
-		parsed, err := time.ParseDuration(*raw.AllowedLateness)
+	liveEventLateness := defaultLiveEventLateness
+	if raw.LiveEventLateness != nil {
+		parsed, err := time.ParseDuration(*raw.LiveEventLateness)
 		if err != nil || parsed < 0 {
-			return EngineConfig{}, fmt.Errorf("engine.allowed_lateness must be a non-negative duration")
+			return EngineConfig{}, fmt.Errorf("engine.live_event_lateness must be a non-negative duration")
 		}
-		allowedLateness = parsed
+		liveEventLateness = parsed
 	}
-	if *raw.MaxPendingEvents < 1 {
-		return EngineConfig{}, fmt.Errorf("engine.max_pending_events must be at least 1")
-	}
-
 	result := EngineConfig{
-		AllowedLateness:  allowedLateness,
-		MaxPendingEvents: *raw.MaxPendingEvents,
-		Rules:            make([]RuleConfig, 0, len(raw.Rules)),
+		LiveEventLateness: liveEventLateness,
+		Rules:             make([]RuleConfig, 0, len(raw.Rules)),
 	}
 	ruleIDs := make(map[string]struct{}, len(raw.Rules))
 	for index, rule := range raw.Rules {
@@ -238,8 +237,7 @@ func parseRule(raw rawRuleConfig) (RuleConfig, error) {
 
 func defaultEngine() EngineConfig {
 	return EngineConfig{
-		AllowedLateness:  defaultAllowedLateness,
-		MaxPendingEvents: defaultMaxPendingEvents,
+		LiveEventLateness: defaultLiveEventLateness,
 		Rules: []RuleConfig{{
 			ID:                  "homepage",
 			Window:              defaultWindow,

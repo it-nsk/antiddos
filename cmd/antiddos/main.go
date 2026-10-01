@@ -12,10 +12,11 @@ import (
 
 	"github.com/it-nsk/antiddos/internal/config"
 	"github.com/it-nsk/antiddos/internal/engine"
-	"github.com/it-nsk/antiddos/internal/ordering"
+	"github.com/it-nsk/antiddos/internal/metrics"
 	"github.com/it-nsk/antiddos/internal/parser"
 	"github.com/it-nsk/antiddos/internal/reader"
 	"github.com/it-nsk/antiddos/internal/request"
+	"github.com/it-nsk/antiddos/internal/storage"
 )
 
 const lineBufferSize = 256
@@ -75,19 +76,27 @@ func execute(ctx context.Context, args []string, logger *slog.Logger) error {
 			Groupings:           groupings,
 		}
 	}
-	ruleEngine, err := engine.New(rules)
+	liveTail := cfg.StartPosition == string(reader.StartAtEnd)
+	ruleEngine, err := engine.NewWithOptions(rules, engine.Options{
+		LiveClock:        liveTail,
+		MaxEventLateness: cfg.Engine.LiveEventLateness,
+	})
 	if err != nil {
 		return fmt.Errorf("initialize rule engine: %w", err)
 	}
-	orderBuffer, err := ordering.New(cfg.Engine.AllowedLateness, cfg.Engine.MaxPendingEvents)
-	if err != nil {
-		return fmt.Errorf("initialize ordering buffer: %w", err)
+	if liveTail {
+		ruleEngine.AdvanceWallClock(time.Now())
 	}
-	analysisConfigID := engine.AnalysisConfigID(
-		ruleEngine.RuleRevisions(),
-		cfg.Engine.AllowedLateness,
-		cfg.Engine.MaxPendingEvents,
-	)
+	analysisConfigID := engine.AnalysisConfigID(ruleEngine.RuleRevisions())
+	database, err := storage.Open(cfg.DatabasePath)
+	if err != nil {
+		return fmt.Errorf("initialize SQLite storage: %w", err)
+	}
+	defer func() {
+		if err := database.Close(); err != nil {
+			logger.Error("close SQLite storage", "error", err)
+		}
+	}()
 
 	follower, err := reader.Open(reader.Options{
 		Path:          cfg.LogFile,
@@ -110,13 +119,22 @@ func execute(ctx context.Context, args []string, logger *slog.Logger) error {
 	logger.Info(
 		"service started",
 		"log_file", cfg.LogFile,
+		"database_file", cfg.DatabasePath,
 		"start_position", cfg.StartPosition,
 		"rules", len(rules),
-		"allowed_lateness", cfg.Engine.AllowedLateness,
-		"max_pending_events", cfg.Engine.MaxPendingEvents,
 		"analysis_config_id", analysisConfigID,
 	)
 	statistics := runStatistics{}
+	metricCollector := metrics.NewCollector()
+	metricsTicker := time.NewTicker(metrics.SampleInterval)
+	defer metricsTicker.Stop()
+	var expiryTicker *time.Ticker
+	var expiryTick <-chan time.Time
+	if liveTail {
+		expiryTicker = time.NewTicker(time.Second)
+		expiryTick = expiryTicker.C
+		defer expiryTicker.Stop()
+	}
 	defer func() {
 		logger.Info(
 			"service stopped",
@@ -133,22 +151,23 @@ func execute(ctx context.Context, args []string, logger *slog.Logger) error {
 			"emitted_detections", statistics.emittedDetections,
 			"suspicious_detections", statistics.suspiciousDetections,
 			"threshold_detections", statistics.thresholdDetections,
-			"buffered_events", statistics.bufferedEvents,
 			"unprocessed_lines", statistics.unprocessedLines,
 			"incomplete", statistics.incomplete,
 		)
 	}()
 
-	var ticker *time.Ticker
-	var tick <-chan time.Time
-	if cfg.Engine.AllowedLateness > 0 {
-		interval := min(cfg.Engine.AllowedLateness, 100*time.Millisecond)
-		ticker = time.NewTicker(interval)
-		defer ticker.Stop()
-		tick = ticker.C
-	}
+	processEvent := func(event request.Event) error {
+		if ruleEngine.IsLate(event.Timestamp) {
+			statistics.lateEvents++
+			if engine.IsHomepageRequest(event) {
+				statistics.lateHomepageRequests++
+			}
+			if statistics.lateEvents == 1 {
+				logger.Warn("late request excluded from rule windows", "timestamp", event.Timestamp)
+			}
+			return nil
+		}
 
-	processOrderedEvent := func(event request.Event) error {
 		statistics.engineProcessedRequests++
 		evaluations, err := ruleEngine.Process(event)
 		if err != nil {
@@ -166,6 +185,9 @@ func execute(ctx context.Context, args []string, logger *slog.Logger) error {
 			if evaluation.Detection == nil {
 				continue
 			}
+			if err := database.RecordDetection(context.Background(), *evaluation.Detection, event); err != nil {
+				return fmt.Errorf("persist detection: %w", err)
+			}
 			statistics.emittedDetections++
 			switch evaluation.Detection.Severity {
 			case engine.SeveritySuspicious:
@@ -180,15 +202,6 @@ func execute(ctx context.Context, args []string, logger *slog.Logger) error {
 		}
 		return nil
 	}
-	processOrdered := func(events []request.Event) error {
-		for _, event := range events {
-			if err := processOrderedEvent(event); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
 	var processingError error
 readLoop:
 	for {
@@ -217,49 +230,36 @@ readLoop:
 			if *printEvents {
 				logRequestEvent(logger, event)
 			}
+			metricCollector.Add(event, engine.IsHomepageRequest(event))
 
-			result, err := orderBuffer.Push(event, time.Now())
-			if orderedErr := processOrdered(result.Ready); orderedErr != nil {
-				processingError = fmt.Errorf("process ordered request: %w", orderedErr)
+			if err := processEvent(event); err != nil {
+				processingError = fmt.Errorf("process request: %w", err)
 				break readLoop
 			}
-			if result.HasImmediate {
-				if orderedErr := processOrderedEvent(result.Immediate); orderedErr != nil {
-					processingError = fmt.Errorf("process ordered request: %w", orderedErr)
-					break readLoop
-				}
-			}
-			if result.Late {
-				statistics.lateEvents++
-				if engine.IsHomepageRequest(event) {
-					statistics.lateHomepageRequests++
-				}
-				if statistics.lateEvents == 1 {
-					logger.Warn("late request excluded from rule windows", "timestamp", event.Timestamp)
-				}
-			}
-			if err != nil {
-				processingError = err
+		case <-metricsTicker.C:
+			if err := metricCollector.Flush(context.Background(), database); err != nil {
+				processingError = fmt.Errorf("persist traffic statistics: %w", err)
 				break readLoop
 			}
-		case now := <-tick:
-			if err := processOrdered(orderBuffer.DrainReady(now)); err != nil {
-				processingError = fmt.Errorf("process ordered request: %w", err)
-				break readLoop
-			}
+		case now := <-expiryTick:
+			ruleEngine.AdvanceWallClock(now)
 		}
 	}
 
 	if processingError != nil {
 		statistics.incomplete = true
-		statistics.bufferedEvents = uint64(orderBuffer.Pending())
 		cancelReader()
 		for range lines {
 			statistics.unprocessedLines++
 		}
-	} else if err := processOrdered(orderBuffer.Flush()); err != nil {
+	}
+	if err := metricCollector.Flush(context.Background(), database); err != nil {
 		statistics.incomplete = true
-		processingError = fmt.Errorf("flush ordered requests: %w", err)
+		if processingError == nil {
+			processingError = fmt.Errorf("persist final traffic statistics: %w", err)
+		} else {
+			logger.Error("persist final traffic statistics", "error", err)
+		}
 	}
 	ruleEngine.Cleanup()
 	readerError := <-readerDone
@@ -290,7 +290,6 @@ type runStatistics struct {
 	emittedDetections         uint64
 	suspiciousDetections      uint64
 	thresholdDetections       uint64
-	bufferedEvents            uint64
 	unprocessedLines          uint64
 	incomplete                bool
 }
@@ -332,6 +331,5 @@ func logDetection(logger *slog.Logger, analysisConfigID string, detection engine
 		"suspicious_threshold", detection.SuspiciousThreshold,
 		"severity", detection.Severity,
 		"dry_run", detection.DryRun,
-		"outcome", detection.Outcome,
 	)
 }

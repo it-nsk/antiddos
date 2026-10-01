@@ -1,14 +1,15 @@
 {
   "log_file": "/var/log/nginx/access.log",
+  "database_path": "/var/lib/antiddos/antiddos.sqlite",
   "start_position": "end",
   "engine": {
-    "max_pending_events": 100000,
+    "live_event_lateness": "30s",
     "rules": [
       {
         "id": "homepage",
         "window": "5s",
         "threshold": 5,
-        "suspicious_threshold": 3,
+        "suspicious_threshold": 0,
         "groupings": [
           {"id": "by_ip", "fields": ["ip"]}
         ]

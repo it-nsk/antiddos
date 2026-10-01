@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"container/heap"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,7 +15,7 @@ import (
 
 const (
 	ruleSemanticsVersion = "homepage-get-v1"
-	cleanupInterval      = time.Second
+	minimumMapShrinkSize = 4096
 )
 
 type Severity string
@@ -47,7 +48,6 @@ type Detection struct {
 	SuspiciousThreshold int
 	Severity            Severity
 	DryRun              bool
-	Outcome             string
 }
 
 type Evaluation struct {
@@ -62,10 +62,21 @@ type Evaluation struct {
 }
 
 type Engine struct {
-	rules       []compiledRule
-	frontier    time.Time
-	hasFrontier bool
-	lastCleanup time.Time
+	rules            []compiledRule
+	frontier         time.Time
+	hasFrontier      bool
+	liveClock        bool
+	maxEventLateness time.Duration
+	wallWatermark    time.Time
+	hasWallWatermark bool
+}
+
+// Options selects whether wall-clock expiration is safe for the input stream.
+// Live tail mode requires a bounded event timestamp delay; replay mode should
+// leave LiveClock disabled and advance expiration only through Process events.
+type Options struct {
+	LiveClock        bool
+	MaxEventLateness time.Duration
 }
 
 type compiledRule struct {
@@ -78,18 +89,32 @@ type compiledRule struct {
 }
 
 type compiledGrouping struct {
-	id     string
-	fields []GroupField
-	key    keyBuilder
-	groups map[GroupKey]*timestampWindow
+	id          string
+	fields      []GroupField
+	key         keyBuilder
+	groups      map[GroupKey]*timestampWindow
+	expiry      expiryHeap
+	peakGroups  int
+	mapRebuilds int
 }
 
 func New(rules []Rule) (*Engine, error) {
+	return NewWithOptions(rules, Options{})
+}
+
+func NewWithOptions(rules []Rule, options Options) (*Engine, error) {
 	if len(rules) == 0 {
 		return nil, fmt.Errorf("at least one rule is required")
 	}
+	if options.MaxEventLateness < 0 {
+		return nil, fmt.Errorf("maximum event lateness must not be negative")
+	}
 
-	result := &Engine{rules: make([]compiledRule, 0, len(rules))}
+	result := &Engine{
+		rules:            make([]compiledRule, 0, len(rules)),
+		liveClock:        options.LiveClock,
+		maxEventLateness: options.MaxEventLateness,
+	}
 	ruleIDs := make(map[string]struct{}, len(rules))
 	for index, rule := range rules {
 		compiled, err := compileRule(rule)
@@ -177,14 +202,15 @@ func compileRule(rule Rule) (compiledRule, error) {
 	return compiled, nil
 }
 
+// Process and AdvanceWallClock must be called by the same owner goroutine.
 func (engine *Engine) Process(event request.Event) ([]Evaluation, error) {
 	timestamp := event.Timestamp.UTC()
-	if engine.hasFrontier && timestamp.Before(engine.frontier) {
-		return nil, fmt.Errorf("event timestamp %s is before engine frontier %s", timestamp.Format(time.RFC3339Nano), engine.frontier.Format(time.RFC3339Nano))
+	if engine.IsLate(timestamp) {
+		return nil, fmt.Errorf("event timestamp %s is before the accepted event-time watermark", timestamp.Format(time.RFC3339Nano))
 	}
 	engine.frontier = timestamp
 	engine.hasFrontier = true
-	engine.cleanup(timestamp, false)
+	engine.cleanup(timestamp)
 
 	if !IsHomepageRequest(event) {
 		return nil, nil
@@ -199,12 +225,16 @@ func (engine *Engine) Process(event request.Event) ([]Evaluation, error) {
 			key, values := grouping.key(event)
 			window := grouping.groups[key]
 			if window == nil {
-				window = &timestampWindow{}
+				window = &timestampWindow{key: key, expiryIndex: -1}
 				grouping.groups[key] = window
+				if len(grouping.groups) > grouping.peakGroups {
+					grouping.peakGroups = len(grouping.groups)
+				}
 			}
 			window.prune(cutoff)
 			before := window.len()
 			window.append(timestamp)
+			grouping.schedule(window, timestamp.Add(rule.window))
 			count := window.len()
 			severity := classify(count, rule.suspiciousThreshold, rule.threshold)
 			evaluation := Evaluation{
@@ -217,10 +247,6 @@ func (engine *Engine) Process(event request.Event) ([]Evaluation, error) {
 				Severity:    severity,
 			}
 			if detectionSeverity := crossing(before, count, rule.suspiciousThreshold, rule.threshold); detectionSeverity != SeverityNormal {
-				outcome := "would_flag"
-				if detectionSeverity == SeverityThresholdExceeded {
-					outcome = "would_trigger"
-				}
 				evaluation.Detection = &Detection{
 					RuleID:              rule.id,
 					RuleRevision:        rule.revision,
@@ -235,7 +261,6 @@ func (engine *Engine) Process(event request.Event) ([]Evaluation, error) {
 					SuspiciousThreshold: rule.suspiciousThreshold,
 					Severity:            detectionSeverity,
 					DryRun:              true,
-					Outcome:             outcome,
 				}
 			}
 			evaluations = append(evaluations, evaluation)
@@ -246,8 +271,32 @@ func (engine *Engine) Process(event request.Event) ([]Evaluation, error) {
 
 func (engine *Engine) Cleanup() {
 	if engine.hasFrontier {
-		engine.cleanup(engine.frontier, true)
+		engine.cleanup(engine.frontier)
 	}
+}
+
+// AdvanceWallClock expires groups in live-tail mode without moving the
+// event-time frontier. MaxEventLateness defines the minimum accepted event
+// timestamp as now-MaxEventLateness; events older than that watermark are late.
+func (engine *Engine) AdvanceWallClock(now time.Time) {
+	if !engine.liveClock {
+		return
+	}
+	watermark := now.Add(-engine.maxEventLateness).UTC()
+	if engine.hasWallWatermark && !watermark.After(engine.wallWatermark) {
+		return
+	}
+	engine.wallWatermark = watermark
+	engine.hasWallWatermark = true
+	engine.cleanup(watermark)
+}
+
+// IsLate reports whether an event would move backward from event time or
+// precede the live-mode wall-clock watermark.
+func (engine *Engine) IsLate(timestamp time.Time) bool {
+	timestamp = timestamp.UTC()
+	return (engine.hasFrontier && timestamp.Before(engine.frontier)) ||
+		(engine.hasWallWatermark && timestamp.Before(engine.wallWatermark))
 }
 
 func (engine *Engine) RuleRevisions() []string {
@@ -258,41 +307,93 @@ func (engine *Engine) RuleRevisions() []string {
 	return revisions
 }
 
-func (engine *Engine) cleanup(frontier time.Time, force bool) {
-	if !force && !engine.lastCleanup.IsZero() && frontier.Sub(engine.lastCleanup) < cleanupInterval {
-		return
-	}
+func (engine *Engine) cleanup(frontier time.Time) {
 	for ruleIndex := range engine.rules {
 		rule := &engine.rules[ruleIndex]
-		cutoff := frontier.Add(-rule.window)
 		for groupingIndex := range rule.groupings {
-			groups := rule.groupings[groupingIndex].groups
-			for key, window := range groups {
-				window.prune(cutoff)
-				if window.len() == 0 {
-					delete(groups, key)
-				}
+			grouping := &rule.groupings[groupingIndex]
+			for grouping.expiry.Len() > 0 && !grouping.expiry[0].expiresAt.After(frontier) {
+				window := heap.Pop(&grouping.expiry).(*timestampWindow)
+				delete(grouping.groups, window.key)
+				window.timestamps = nil
+				window.head = 0
+				grouping.shrinkIfNeeded()
 			}
 		}
 	}
-	engine.lastCleanup = frontier
+}
+
+func (grouping *compiledGrouping) schedule(window *timestampWindow, expiresAt time.Time) {
+	window.expiresAt = expiresAt
+	if window.expiryIndex < 0 {
+		heap.Push(&grouping.expiry, window)
+		return
+	}
+	heap.Fix(&grouping.expiry, window.expiryIndex)
+}
+
+func (grouping *compiledGrouping) shrinkIfNeeded() {
+	count := len(grouping.groups)
+	if count == 0 {
+		grouping.groups = make(map[GroupKey]*timestampWindow)
+		grouping.expiry = nil
+		grouping.peakGroups = 0
+		grouping.mapRebuilds++
+		return
+	}
+	if grouping.peakGroups < minimumMapShrinkSize || count > grouping.peakGroups/4 {
+		return
+	}
+	groups := make(map[GroupKey]*timestampWindow, count)
+	for key, window := range grouping.groups {
+		groups[key] = window
+	}
+	grouping.groups = groups
+	shrunkHeap := make(expiryHeap, len(grouping.expiry))
+	copy(shrunkHeap, grouping.expiry)
+	grouping.expiry = shrunkHeap
+	heap.Init(&grouping.expiry)
+	grouping.peakGroups = count
+	grouping.mapRebuilds++
+}
+
+type expiryHeap []*timestampWindow
+
+func (expiry expiryHeap) Len() int { return len(expiry) }
+func (expiry expiryHeap) Less(left, right int) bool {
+	return expiry[left].expiresAt.Before(expiry[right].expiresAt)
+}
+func (expiry expiryHeap) Swap(left, right int) {
+	expiry[left], expiry[right] = expiry[right], expiry[left]
+	expiry[left].expiryIndex = left
+	expiry[right].expiryIndex = right
+}
+func (expiry *expiryHeap) Push(value any) {
+	window := value.(*timestampWindow)
+	window.expiryIndex = len(*expiry)
+	*expiry = append(*expiry, window)
+}
+func (expiry *expiryHeap) Pop() any {
+	old := *expiry
+	last := len(old) - 1
+	window := old[last]
+	old[last] = nil
+	window.expiryIndex = -1
+	*expiry = old[:last]
+	return window
 }
 
 func IsHomepageRequest(event request.Event) bool {
 	return event.Method == "GET" && event.Path == "/"
 }
 
-func AnalysisConfigID(ruleRevisions []string, allowedLateness time.Duration, maxPendingEvents int) string {
+func AnalysisConfigID(ruleRevisions []string) string {
 	canonical := struct {
-		Version          string   `json:"version"`
-		RuleRevisions    []string `json:"rule_revisions"`
-		AllowedLateness  int64    `json:"allowed_lateness_ns"`
-		MaxPendingEvents int      `json:"max_pending_events"`
+		Version       string   `json:"version"`
+		RuleRevisions []string `json:"rule_revisions"`
 	}{
-		Version:          "analysis-v1-late-drop",
-		RuleRevisions:    append([]string(nil), ruleRevisions...),
-		AllowedLateness:  int64(allowedLateness),
-		MaxPendingEvents: maxPendingEvents,
+		Version:       "analysis-v2-immediate",
+		RuleRevisions: append([]string(nil), ruleRevisions...),
 	}
 	encoded, _ := json.Marshal(canonical)
 	sum := sha256.Sum256(encoded)
