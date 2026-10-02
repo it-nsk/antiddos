@@ -246,7 +246,7 @@ func (engine *Engine) Process(event request.Event) ([]Evaluation, error) {
 				Count:       count,
 				Severity:    severity,
 			}
-			if detectionSeverity := crossing(before, count, rule.suspiciousThreshold, rule.threshold); detectionSeverity != SeverityNormal {
+			if detectionSeverity := classifyDetection(before, count, rule.suspiciousThreshold, rule.threshold); detectionSeverity != SeverityNormal {
 				evaluation.Detection = &Detection{
 					RuleID:              rule.id,
 					RuleRevision:        rule.revision,
@@ -410,8 +410,12 @@ func classify(count, suspicious, threshold int) Severity {
 	return SeverityNormal
 }
 
-func crossing(before, after, suspicious, threshold int) Severity {
-	if before < threshold && after >= threshold {
+func classifyDetection(before, after, suspicious, threshold int) Severity {
+	// Every request that leaves its group at or above the main threshold is a
+	// violation and must be persisted. The count may rise or fall as the exact
+	// sliding window advances; it remains a violation until it drops below the
+	// threshold.
+	if after >= threshold {
 		return SeverityThresholdExceeded
 	}
 	if suspicious > 0 && before < suspicious && after >= suspicious {
@@ -440,7 +444,7 @@ func ruleRevision(rule Rule) (string, error) {
 		WindowNS:            int64(rule.Window),
 		Threshold:           rule.Threshold,
 		SuspiciousThreshold: rule.SuspiciousThreshold,
-		NotificationPolicy:  "threshold-crossings",
+		NotificationPolicy:  "every-threshold-violation",
 		Groupings:           make([]canonicalGrouping, len(rule.Groupings)),
 	}
 	for index, grouping := range rule.Groupings {

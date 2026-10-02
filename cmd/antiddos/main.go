@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -22,40 +21,28 @@ import (
 const lineBufferSize = 256
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if err := execute(ctx, os.Args[1:], logger); err != nil {
-		logger.Error("service failed", "error", err)
+		logger.Error("command failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-func execute(ctx context.Context, args []string, logger *slog.Logger) error {
-	if len(args) == 0 || args[0] != "run" {
-		return fmt.Errorf("usage: antiddos run [--config PATH] [--from-start] [--print-lines] [--print-events]")
-	}
-
-	flags := flag.NewFlagSet("run", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-	configPath := flags.String("config", config.DefaultPath, "path to JSON configuration")
-	fromStart := flags.Bool("from-start", false, "override start_position and read the existing file from the beginning")
-	printLines := flags.Bool("print-lines", false, "print every complete input line; intended only for development")
-	printEvents := flags.Bool("print-events", false, "print every parsed request event; intended only for development")
-	if err := flags.Parse(args[1:]); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return fmt.Errorf("unexpected arguments: %v", flags.Args())
-	}
-
-	cfg, err := config.Load(*configPath)
+func run(ctx context.Context, args []string, logger *slog.Logger) error {
+	opts, err := parseRunFlags(args[1:], os.Stderr)
 	if err != nil {
 		return err
 	}
-	if *fromStart {
+
+	cfg, err := config.LoadWithLogFile(opts.Config, opts.LogFile)
+	if err != nil {
+		return err
+	}
+	if opts.FromStart {
 		cfg.StartPosition = string(reader.StartAtBeginning)
 	}
 	rules := make([]engine.Rule, len(cfg.Engine.Rules))
@@ -97,7 +84,6 @@ func execute(ctx context.Context, args []string, logger *slog.Logger) error {
 			logger.Error("close SQLite storage", "error", err)
 		}
 	}()
-
 	follower, err := reader.Open(reader.Options{
 		Path:          cfg.LogFile,
 		StartPosition: reader.StartPosition(cfg.StartPosition),
@@ -211,14 +197,14 @@ readLoop:
 				break readLoop
 			}
 			statistics.linesRead++
-			if *printLines {
+			if opts.PrintLines {
 				fmt.Fprintln(os.Stdout, line)
 			}
 
 			event, err := parser.ParseNginx(line)
 			if err != nil {
 				statistics.parseFailures++
-				if *printEvents {
+				if opts.PrintEvents {
 					logger.Warn("request parse failed", "error", err)
 				}
 				continue
@@ -227,7 +213,7 @@ readLoop:
 			if engine.IsHomepageRequest(event) {
 				statistics.matchingHomepageRequests++
 			}
-			if *printEvents {
+			if opts.PrintEvents {
 				logRequestEvent(logger, event)
 			}
 			metricCollector.Add(event, engine.IsHomepageRequest(event))

@@ -6,7 +6,9 @@ After=local-fs.target
 Type=simple
 User=antiddos
 Group=antiddos
-ExecStart=/usr/local/bin/antiddos run --config /etc/antiddos/config.json
+Environment=ANTIDDOS_CONFIG=/etc/antiddos/config.json
+EnvironmentFile=-/etc/default/antiddos
+ExecStart=/usr/local/bin/antiddos run
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=10s

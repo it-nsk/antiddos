@@ -73,14 +73,21 @@ type rawGroupingConfig struct {
 }
 
 func Load(path string) (Config, error) {
+	return LoadWithLogFile(path, "")
+}
+
+func LoadWithLogFile(path, logFile string) (Config, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("open config %q: %w", path, err)
 	}
 	defer file.Close()
+	return decode(file, path, logFile)
+}
 
+func decode(input io.Reader, path, logFile string) (Config, error) {
 	var raw rawConfig
-	decoder := json.NewDecoder(file)
+	decoder := json.NewDecoder(input)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&raw); err != nil {
 		return Config{}, fmt.Errorf("decode config %q: %w", path, err)
@@ -93,6 +100,9 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("decode config %q: %w", path, err)
 	}
 
+	if logFile != "" {
+		raw.LogFile = logFile
+	}
 	if raw.LogFile == "" {
 		return Config{}, fmt.Errorf("config %q: log_file is required", path)
 	}
