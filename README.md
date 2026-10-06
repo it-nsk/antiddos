@@ -19,39 +19,54 @@ mode and does not block requests or modify the firewall.
 - automatic expiration of inactive rule groups during live tailing;
 - terminal monitoring of traffic and detections stored in SQLite.
 
-## Run and monitor
+## Quick start
 
-The service is always started and stopped by systemd. On startup it opens the
-Nginx log, creates the SQLite database when necessary, writes traffic statistics
-every 15 seconds, and writes detections as they occur.
+On a Linux amd64 server, replace the path with the Nginx access log that should
+be monitored:
 
-0. The demo runs directly from the source code. On Ubuntu/Debian, install Go
-and GCC first:
+```shell
+curl -fsSL https://raw.githubusercontent.com/it-nsk/antiddos/dev/scripts/install.sh -o /tmp/antiddos-install.sh
+sudo bash /tmp/antiddos-install.sh --log-file /var/log/nginx/access.log
+sudo -u antiddos /usr/local/bin/antiddos monitor
+```
+
+The installer downloads the latest GitHub Release, verifies its SHA256 checksum,
+creates the `antiddos` account, installs the binary, example configuration and
+systemd unit, enables and starts the service, creates the SQLite database, and
+verifies that the terminal monitor can read it.
+`monitor` refreshes every two seconds; exit it with `Ctrl+C`. The systemd
+service continues running in the background.
+
+Installation and runtime paths:
+
+```text
+Nginx log:  path passed through --log-file
+Config:     /etc/antiddos/config.json
+Binary:     /usr/local/bin/antiddos
+SQLite:     /var/lib/antiddos/antiddos.sqlite
+Systemd:    antiddos.service
+```
+
+Existing configuration and SQLite data are preserved when the installer is run
+again. The server does not need Git, Go, GCC, or the project source code. Install
+a specific release with `--version v0.1.0`.
+
+## Local demo
+
+The demo runs directly from the source tree without systemd or configuration:
 
 ```shell
 sudo apt-get update && sudo apt-get install -y golang-go gcc
-```
-
-These tools are required only to build and run the demo: the script uses
-`go run`, and the SQLite driver is compiled through CGO. An already built
-production binary does not require Go or GCC.
-
-Run the self-contained demo from the repository root:
-
-```shell
 ./scripts/demo.sh
 ```
 
 It needs no configuration or systemd installation. Press `Ctrl+C` to stop; the
 generated log, config, SQLite database, and service log remain in `runtime/demo/`.
 
-1. Create the configuration file:
+## Configuration and service control
 
-```shell
-sudo install -D -m 0644 deploy/config.example.json /etc/antiddos/config.json
-```
-
-2. Edit `/etc/antiddos/config.json`. Minimal example:
+Edit `/etc/antiddos/config.json` when its defaults do not match the server.
+Minimal example:
 
 ```json
 {
@@ -72,6 +87,12 @@ sudo install -D -m 0644 deploy/config.example.json /etc/antiddos/config.json
     }]
   }
 }
+```
+
+Apply configuration changes with:
+
+```shell
+sudo systemctl restart antiddos
 ```
 
 The log path can instead be overridden in `/etc/default/antiddos`:
@@ -182,6 +203,25 @@ a timestamp earlier than the last processed event is excluded from rule windows
 and counted as late. In live mode, events older than the configured wall-clock
 lateness watermark are also excluded; replay mode has no wall-clock watermark.
 
+## Publishing a release
+
+The workflow in `.github/workflows/release.yml` runs for tags beginning with
+`v`. It tests the project, builds the Linux amd64 archive, creates its SHA256
+file, and publishes both files in a GitHub Release. Repository Actions settings
+must allow `Read and write permissions` for the workflow token.
+
+Publish a version from the commit that should be released:
+
+```shell
+git switch dev
+git pull
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+Watch the run in GitHub Actions. After it succeeds, the normal installer uses
+that release automatically through the `releases/latest/download` URL.
+
 ## TODO
 
 - [x] Daemon and systemd unit.
@@ -192,5 +232,5 @@ lateness watermark are also excluded; replay mode has no wall-clock watermark.
 - [x] Structured detections for every request at or above the main threshold.
 - [x] Metrics and SQLite persistence.
 - [x] Terminal monitoring of SQLite traffic and detections.
-- [ ] Installation script.
+- [x] Installation script.
 - [ ] Performance measurements.

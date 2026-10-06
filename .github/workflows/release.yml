@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux-amd64:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify source
+        run: |
+          go test ./...
+          go test -race ./...
+          go vet ./...
+
+      - name: Build release archive
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          set -euo pipefail
+          package_dir="dist/package"
+          mkdir -p "$package_dir"
+          go build -trimpath -o "$package_dir/antiddos" ./cmd/antiddos
+          install -m 0644 deploy/antiddos.service "$package_dir/antiddos.service"
+          install -m 0644 deploy/config.example.json "$package_dir/config.example.json"
+          install -m 0644 deploy/antiddos.env.example "$package_dir/antiddos.env.example"
+          tar -C "$package_dir" -czf dist/antiddos-linux-amd64.tar.gz .
+          cd dist
+          sha256sum antiddos-linux-amd64.tar.gz > antiddos-linux-amd64.tar.gz.sha256
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/antiddos-linux-amd64.tar.gz \
+            dist/antiddos-linux-amd64.tar.gz.sha256 \
+            --verify-tag \
+            --generate-notes \
+            --title "${GITHUB_REF_NAME}"
