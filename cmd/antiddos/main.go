@@ -47,26 +47,15 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	}
 	rules := make([]engine.Rule, len(cfg.Engine.Rules))
 	for ruleIndex, configuredRule := range cfg.Engine.Rules {
-		groupings := make([]engine.Grouping, len(configuredRule.Groupings))
-		for groupingIndex, configuredGrouping := range configuredRule.Groupings {
-			fields := make([]engine.GroupField, len(configuredGrouping.Fields))
-			for fieldIndex, field := range configuredGrouping.Fields {
-				fields[fieldIndex] = engine.GroupField(field)
-			}
-			groupings[groupingIndex] = engine.Grouping{ID: configuredGrouping.ID, Fields: fields}
-		}
 		rules[ruleIndex] = engine.Rule{
-			ID:                  configuredRule.ID,
-			Window:              configuredRule.Window,
-			Threshold:           configuredRule.Threshold,
-			SuspiciousThreshold: configuredRule.SuspiciousThreshold,
-			Groupings:           groupings,
+			ID: configuredRule.ID, PathRegex: configuredRule.PathRegex,
+			Window: configuredRule.Window, Threshold: configuredRule.Threshold,
+			GroupBy: engine.GroupField(configuredRule.GroupBy),
 		}
 	}
 	liveTail := cfg.StartPosition == string(reader.StartAtEnd)
 	ruleEngine, err := engine.NewWithOptions(rules, engine.Options{
-		LiveClock:        liveTail,
-		MaxEventLateness: cfg.Engine.LiveEventLateness,
+		LiveClock: liveTail,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize rule engine: %w", err)
@@ -127,15 +116,14 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 			"lines_read", statistics.linesRead,
 			"parsed_requests", statistics.parsedRequests,
 			"parse_failures", statistics.parseFailures,
-			"matching_homepage_requests", statistics.matchingHomepageRequests,
+			"matching_requests", statistics.matchingRequests,
 			"engine_processed_requests", statistics.engineProcessedRequests,
-			"evaluated_homepage_requests", statistics.evaluatedHomepageRequests,
+			"evaluated_matching_requests", statistics.evaluatedMatchingRequests,
 			"late_events", statistics.lateEvents,
-			"late_homepage_requests", statistics.lateHomepageRequests,
+			"late_matching_requests", statistics.lateMatchingRequests,
 			"violating_requests", statistics.violatingRequests,
 			"violating_evaluations", statistics.violatingEvaluations,
 			"emitted_detections", statistics.emittedDetections,
-			"suspicious_detections", statistics.suspiciousDetections,
 			"threshold_detections", statistics.thresholdDetections,
 			"unprocessed_lines", statistics.unprocessedLines,
 			"incomplete", statistics.incomplete,
@@ -145,8 +133,8 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	processEvent := func(event request.Event) error {
 		if ruleEngine.IsLate(event.Timestamp) {
 			statistics.lateEvents++
-			if engine.IsHomepageRequest(event) {
-				statistics.lateHomepageRequests++
+			if ruleEngine.Matches(event) {
+				statistics.lateMatchingRequests++
 			}
 			if statistics.lateEvents == 1 {
 				logger.Warn("late request excluded from rule windows", "timestamp", event.Timestamp)
@@ -159,12 +147,12 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
-		if engine.IsHomepageRequest(event) {
-			statistics.evaluatedHomepageRequests++
+		if ruleEngine.Matches(event) {
+			statistics.evaluatedMatchingRequests++
 		}
 		violating := false
 		for _, evaluation := range evaluations {
-			if evaluation.Severity == engine.SeverityThresholdExceeded {
+			if evaluation.Violated {
 				violating = true
 				statistics.violatingEvaluations++
 			}
@@ -175,12 +163,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 				return fmt.Errorf("persist detection: %w", err)
 			}
 			statistics.emittedDetections++
-			switch evaluation.Detection.Severity {
-			case engine.SeveritySuspicious:
-				statistics.suspiciousDetections++
-			case engine.SeverityThresholdExceeded:
-				statistics.thresholdDetections++
-			}
+			statistics.thresholdDetections++
 			logDetection(logger, analysisConfigID, *evaluation.Detection)
 		}
 		if violating {
@@ -210,13 +193,14 @@ readLoop:
 				continue
 			}
 			statistics.parsedRequests++
-			if engine.IsHomepageRequest(event) {
-				statistics.matchingHomepageRequests++
+			matches := ruleEngine.Matches(event)
+			if matches {
+				statistics.matchingRequests++
 			}
 			if opts.PrintEvents {
 				logRequestEvent(logger, event)
 			}
-			metricCollector.Add(event, engine.IsHomepageRequest(event))
+			metricCollector.Add(event, matches)
 
 			if err := processEvent(event); err != nil {
 				processingError = fmt.Errorf("process request: %w", err)
@@ -257,7 +241,7 @@ readLoop:
 		return readerError
 	}
 	if statistics.lateEvents > 0 {
-		logger.Warn("analysis excluded late requests", "late_events", statistics.lateEvents, "late_homepage_requests", statistics.lateHomepageRequests)
+		logger.Warn("analysis excluded late requests", "late_events", statistics.lateEvents, "late_matching_requests", statistics.lateMatchingRequests)
 	}
 	return nil
 }
@@ -266,15 +250,14 @@ type runStatistics struct {
 	linesRead                 uint64
 	parsedRequests            uint64
 	parseFailures             uint64
-	matchingHomepageRequests  uint64
+	matchingRequests          uint64
 	engineProcessedRequests   uint64
-	evaluatedHomepageRequests uint64
+	evaluatedMatchingRequests uint64
 	lateEvents                uint64
-	lateHomepageRequests      uint64
+	lateMatchingRequests      uint64
 	violatingRequests         uint64
 	violatingEvaluations      uint64
 	emittedDetections         uint64
-	suspiciousDetections      uint64
 	thresholdDetections       uint64
 	unprocessedLines          uint64
 	incomplete                bool
@@ -305,17 +288,14 @@ func logDetection(logger *slog.Logger, analysisConfigID string, detection engine
 		"rule", detection.RuleID,
 		"rule_revision", detection.RuleRevision,
 		"analysis_config_id", analysisConfigID,
-		"grouping", detection.GroupingID,
-		"group_fields", detection.GroupFields,
-		"group_values", detection.GroupValues,
+		"group_by", detection.GroupField,
+		"group_value", detection.GroupValue,
 		"group", detection.GroupKey,
 		"event_timestamp", detection.EventTimestamp,
 		"emitted_at", time.Now(),
 		"count", detection.Count,
 		"window", detection.Window,
 		"threshold", detection.Threshold,
-		"suspicious_threshold", detection.SuspiciousThreshold,
-		"severity", detection.Severity,
 		"dry_run", detection.DryRun,
 	)
 }

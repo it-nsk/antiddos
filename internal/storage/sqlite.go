@@ -80,7 +80,7 @@ func (store *Store) createSchema(ctx context.Context) error {
 			bucket_start_unix INTEGER PRIMARY KEY,
 			interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
 			requests INTEGER NOT NULL CHECK (requests >= 0),
-			homepage_requests INTEGER NOT NULL CHECK (homepage_requests >= 0 AND homepage_requests <= requests),
+			matched_requests INTEGER NOT NULL CHECK (matched_requests >= 0 AND matched_requests <= requests),
 			response_bytes INTEGER NOT NULL CHECK (response_bytes >= 0),
 			known_response_byte_rows INTEGER NOT NULL CHECK (known_response_byte_rows >= 0 AND known_response_byte_rows <= requests)
 		)`,
@@ -108,6 +108,9 @@ func (store *Store) createSchema(ctx context.Context) error {
 	if err := store.removeObsoleteColumns(ctx, "traffic_samples", "updated_at_unix_ms"); err != nil {
 		return err
 	}
+	if err := store.renameColumnIfNeeded(ctx, "traffic_samples", "homepage_requests", "matched_requests"); err != nil {
+		return err
+	}
 	if err := store.migrateDetections(ctx); err != nil {
 		return err
 	}
@@ -118,6 +121,38 @@ func (store *Store) createSchema(ctx context.Context) error {
 	} {
 		if _, err := store.db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("create SQLite index: %w", err)
+		}
+	}
+	return nil
+}
+
+func (store *Store) renameColumnIfNeeded(ctx context.Context, table, oldName, newName string) error {
+	rows, err := store.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	var oldFound, newFound bool
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return fmt.Errorf("read %s schema: %w", table, err)
+		}
+		oldFound = oldFound || name == oldName
+		newFound = newFound || name == newName
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate %s schema: %w", table, err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close %s schema: %w", table, err)
+	}
+	if oldFound && !newFound {
+		if _, err := store.db.ExecContext(ctx, `ALTER TABLE `+table+` RENAME COLUMN `+oldName+` TO `+newName); err != nil {
+			return fmt.Errorf("rename %s.%s: %w", table, oldName, err)
 		}
 	}
 	return nil
@@ -242,12 +277,12 @@ func (store *Store) WriteTrafficSamples(ctx context.Context, samples []metrics.S
 	defer tx.Rollback()
 
 	statement, err := tx.PrepareContext(ctx, `INSERT INTO traffic_samples (
-		bucket_start_unix, interval_seconds, requests, homepage_requests,
+		bucket_start_unix, interval_seconds, requests, matched_requests,
 		response_bytes, known_response_byte_rows
 	) VALUES (?, ?, ?, ?, ?, ?)
 	ON CONFLICT(bucket_start_unix) DO UPDATE SET
 		requests = traffic_samples.requests + excluded.requests,
-		homepage_requests = traffic_samples.homepage_requests + excluded.homepage_requests,
+		matched_requests = traffic_samples.matched_requests + excluded.matched_requests,
 		response_bytes = traffic_samples.response_bytes + excluded.response_bytes,
 		known_response_byte_rows = traffic_samples.known_response_byte_rows + excluded.known_response_byte_rows`)
 	if err != nil {
@@ -260,7 +295,7 @@ func (store *Store) WriteTrafficSamples(ctx context.Context, samples []metrics.S
 			sample.BucketStartUnix,
 			sample.IntervalSeconds,
 			sample.Requests,
-			sample.HomepageRequests,
+			sample.MatchedRequests,
 			sample.ResponseBytes,
 			sample.KnownResponseByteRows,
 		); err != nil {
@@ -274,7 +309,7 @@ func (store *Store) WriteTrafficSamples(ctx context.Context, samples []metrics.S
 }
 
 func (store *Store) RecordDetection(ctx context.Context, detection engine.Detection, event request.Event) error {
-	groupValues, err := json.Marshal(detection.GroupValues)
+	groupValues, err := json.Marshal([]string{detection.GroupValue})
 	if err != nil {
 		return fmt.Errorf("encode detection group values: %w", err)
 	}
@@ -288,7 +323,7 @@ func (store *Store) RecordDetection(ctx context.Context, detection engine.Detect
 		event.Timestamp.Format(time.RFC3339Nano),
 		time.Now().UnixMilli(),
 		detection.RuleID,
-		detection.GroupingID,
+		string(detection.GroupField),
 		string(groupValues),
 		event.IP.Unmap().String(),
 		event.UserAgent,

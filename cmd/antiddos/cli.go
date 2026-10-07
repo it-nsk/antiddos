@@ -21,7 +21,6 @@ import (
 const usage = `Usage:
   antiddos run [OPTIONS]       run the analyzer (used by systemd)
   antiddos monitor [OPTIONS]   show traffic and detections from SQLite
-  antiddos demo                run a self-contained local demonstration
 
 The systemd service reads /etc/antiddos/config.json. Values from
 /etc/default/antiddos can override its paths:
@@ -47,8 +46,6 @@ func executeCommand(ctx context.Context, args []string, logger *slog.Logger, out
 		err = run(ctx, args, logger)
 	case "monitor":
 		err = monitor(ctx, args[1:], out)
-	case "demo":
-		err = demo(ctx, args[1:], out)
 	default:
 		err = fmt.Errorf("unknown command %q; use antiddos --help", args[0])
 	}
@@ -201,13 +198,13 @@ func safeText(s string) string {
 
 func printTraffic(out io.Writer, rows []metrics.Sample) error {
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "BUCKET START\tREQUESTS\tHOME\tREQ/S\tBYTES\tBYTES/S\tAVG RESPONSE")
+	fmt.Fprintln(w, "BUCKET START\tREQUESTS\tMATCHED\tREQ/S\tBYTES\tBYTES/S\tAVG RESPONSE")
 	for _, r := range rows {
 		average := "-"
 		if r.KnownResponseByteRows > 0 {
 			average = fmt.Sprintf("%.1f", float64(r.ResponseBytes)/float64(r.KnownResponseByteRows))
 		}
-		fmt.Fprintf(w, "%s\t%d\t%d\t%.2f\t%d\t%.2f\t%s\n", time.Unix(r.BucketStartUnix, 0).Format(time.RFC3339), r.Requests, r.HomepageRequests, float64(r.Requests)/float64(r.IntervalSeconds), r.ResponseBytes, float64(r.ResponseBytes)/float64(r.IntervalSeconds), average)
+		fmt.Fprintf(w, "%s\t%d\t%d\t%.2f\t%d\t%.2f\t%s\n", time.Unix(r.BucketStartUnix, 0).Format(time.RFC3339), r.Requests, r.MatchedRequests, float64(r.Requests)/float64(r.IntervalSeconds), r.ResponseBytes, float64(r.ResponseBytes)/float64(r.IntervalSeconds), average)
 	}
 	if len(rows) == 0 {
 		fmt.Fprintln(w, "(no samples yet; statistics are written every 15 seconds)")

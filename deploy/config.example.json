@@ -3,18 +3,13 @@
   "database_path": "/var/lib/antiddos/antiddos.sqlite",
   "start_position": "end",
   "engine": {
-    "live_event_lateness": "30s",
     "rules": [
       {
         "id": "homepage",
+        "path_regex": "^/$",
         "window": "5s",
         "threshold": 5,
-        "suspicious_threshold": 0,
-        "groupings": [
-          {"id": "by_ip", "fields": ["ip"]},
-          {"id": "by_user_agent", "fields": ["user_agent"]},
-          {"id": "by_ip_user_agent", "fields": ["ip", "user_agent"]}
-        ]
+        "group_by": "ip"
       }
     ]
   }
