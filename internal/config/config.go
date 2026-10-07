@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
+	"regexp"
 	"time"
 	"unicode"
 )
@@ -16,10 +16,9 @@ const DefaultPath = "/etc/antiddos/config.json"
 const DefaultDatabasePath = "/var/lib/antiddos/antiddos.sqlite"
 
 const (
-	defaultWindow            = 5 * time.Second
-	defaultThreshold         = 5
-	defaultSuspicious        = 3
-	defaultLiveEventLateness = 30 * time.Second
+	defaultPathRegex = `^/$`
+	defaultWindow    = 5 * time.Second
+	defaultThreshold = 5
 )
 
 type Config struct {
@@ -29,22 +28,14 @@ type Config struct {
 	Engine        EngineConfig
 }
 
-type EngineConfig struct {
-	LiveEventLateness time.Duration
-	Rules             []RuleConfig
-}
+type EngineConfig struct{ Rules []RuleConfig }
 
 type RuleConfig struct {
-	ID                  string
-	Window              time.Duration
-	Threshold           int
-	SuspiciousThreshold int
-	Groupings           []GroupingConfig
-}
-
-type GroupingConfig struct {
-	ID     string
-	Fields []string
+	ID        string
+	PathRegex string
+	Window    time.Duration
+	Threshold int
+	GroupBy   string
 }
 
 type rawConfig struct {
@@ -55,26 +46,18 @@ type rawConfig struct {
 }
 
 type rawEngineConfig struct {
-	LiveEventLateness *string         `json:"live_event_lateness"`
-	Rules             []rawRuleConfig `json:"rules"`
+	Rules []rawRuleConfig `json:"rules"`
 }
 
 type rawRuleConfig struct {
-	ID                  string              `json:"id"`
-	Window              *string             `json:"window"`
-	Threshold           *int                `json:"threshold"`
-	SuspiciousThreshold *int                `json:"suspicious_threshold"`
-	Groupings           []rawGroupingConfig `json:"groupings"`
+	ID        string  `json:"id"`
+	PathRegex *string `json:"path_regex"`
+	Window    *string `json:"window"`
+	Threshold *int    `json:"threshold"`
+	GroupBy   *string `json:"group_by"`
 }
 
-type rawGroupingConfig struct {
-	ID     string   `json:"id"`
-	Fields []string `json:"fields"`
-}
-
-func Load(path string) (Config, error) {
-	return LoadWithLogFile(path, "")
-}
+func Load(path string) (Config, error) { return LoadWithLogFile(path, "") }
 
 func LoadWithLogFile(path, logFile string) (Config, error) {
 	file, err := os.Open(path)
@@ -99,7 +82,6 @@ func decode(input io.Reader, path, logFile string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("decode config %q: %w", path, err)
 	}
-
 	if logFile != "" {
 		raw.LogFile = logFile
 	}
@@ -121,17 +103,13 @@ func decode(input io.Reader, path, logFile string) (Config, error) {
 	if raw.StartPosition != "end" && raw.StartPosition != "beginning" {
 		return Config{}, fmt.Errorf("config %q: start_position must be %q or %q", path, "end", "beginning")
 	}
-
 	engineConfig, err := parseEngine(raw.Engine)
 	if err != nil {
 		return Config{}, fmt.Errorf("config %q: %w", path, err)
 	}
-
 	return Config{
-		LogFile:       filepath.Clean(raw.LogFile),
-		DatabasePath:  filepath.Clean(raw.DatabasePath),
-		StartPosition: raw.StartPosition,
-		Engine:        engineConfig,
+		LogFile: filepath.Clean(raw.LogFile), DatabasePath: filepath.Clean(raw.DatabasePath),
+		StartPosition: raw.StartPosition, Engine: engineConfig,
 	}, nil
 }
 
@@ -142,7 +120,6 @@ func parseEngine(data json.RawMessage) (EngineConfig, error) {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return EngineConfig{}, fmt.Errorf("engine must be an object, not null")
 	}
-
 	var raw rawEngineConfig
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -152,19 +129,7 @@ func parseEngine(data json.RawMessage) (EngineConfig, error) {
 	if len(raw.Rules) == 0 {
 		return EngineConfig{}, fmt.Errorf("engine.rules must contain at least one rule")
 	}
-
-	liveEventLateness := defaultLiveEventLateness
-	if raw.LiveEventLateness != nil {
-		parsed, err := time.ParseDuration(*raw.LiveEventLateness)
-		if err != nil || parsed < 0 {
-			return EngineConfig{}, fmt.Errorf("engine.live_event_lateness must be a non-negative duration")
-		}
-		liveEventLateness = parsed
-	}
-	result := EngineConfig{
-		LiveEventLateness: liveEventLateness,
-		Rules:             make([]RuleConfig, 0, len(raw.Rules)),
-	}
+	result := EngineConfig{Rules: make([]RuleConfig, 0, len(raw.Rules))}
 	ruleIDs := make(map[string]struct{}, len(raw.Rules))
 	for index, rule := range raw.Rules {
 		parsed, err := parseRule(rule)
@@ -184,8 +149,11 @@ func parseRule(raw rawRuleConfig) (RuleConfig, error) {
 	if err := validateID(raw.ID); err != nil {
 		return RuleConfig{}, fmt.Errorf("id: %w", err)
 	}
-	if raw.Window == nil || raw.Threshold == nil || raw.SuspiciousThreshold == nil {
-		return RuleConfig{}, fmt.Errorf("window, threshold, and suspicious_threshold are required")
+	if raw.PathRegex == nil || raw.Window == nil || raw.Threshold == nil || raw.GroupBy == nil {
+		return RuleConfig{}, fmt.Errorf("path_regex, window, threshold, and group_by are required")
+	}
+	if _, err := regexp.Compile(*raw.PathRegex); err != nil {
+		return RuleConfig{}, fmt.Errorf("path_regex: %w", err)
 	}
 	window, err := time.ParseDuration(*raw.Window)
 	if err != nil || window <= 0 {
@@ -194,68 +162,17 @@ func parseRule(raw rawRuleConfig) (RuleConfig, error) {
 	if *raw.Threshold < 1 {
 		return RuleConfig{}, fmt.Errorf("threshold must be at least 1")
 	}
-	if *raw.SuspiciousThreshold < 0 || (*raw.SuspiciousThreshold > 0 && *raw.SuspiciousThreshold >= *raw.Threshold) {
-		return RuleConfig{}, fmt.Errorf("suspicious_threshold must be 0 or less than threshold")
+	if !supportedGroupField(*raw.GroupBy) {
+		return RuleConfig{}, fmt.Errorf("unsupported group_by %q", *raw.GroupBy)
 	}
-	if len(raw.Groupings) == 0 {
-		return RuleConfig{}, fmt.Errorf("groupings must contain at least one grouping")
-	}
-
-	result := RuleConfig{
-		ID:                  raw.ID,
-		Window:              window,
-		Threshold:           *raw.Threshold,
-		SuspiciousThreshold: *raw.SuspiciousThreshold,
-		Groupings:           make([]GroupingConfig, 0, len(raw.Groupings)),
-	}
-	groupingIDs := make(map[string]struct{}, len(raw.Groupings))
-	definitions := make(map[string]struct{}, len(raw.Groupings))
-	for index, grouping := range raw.Groupings {
-		if err := validateID(grouping.ID); err != nil {
-			return RuleConfig{}, fmt.Errorf("groupings[%d].id: %w", index, err)
-		}
-		if _, exists := groupingIDs[grouping.ID]; exists {
-			return RuleConfig{}, fmt.Errorf("groupings[%d]: duplicate id %q", index, grouping.ID)
-		}
-		if len(grouping.Fields) == 0 {
-			return RuleConfig{}, fmt.Errorf("groupings[%d].fields must not be empty", index)
-		}
-
-		fieldSet := make(map[string]struct{}, len(grouping.Fields))
-		for _, field := range grouping.Fields {
-			if !supportedGroupField(field) {
-				return RuleConfig{}, fmt.Errorf("groupings[%d]: unsupported field %q", index, field)
-			}
-			if _, exists := fieldSet[field]; exists {
-				return RuleConfig{}, fmt.Errorf("groupings[%d]: duplicate field %q", index, field)
-			}
-			fieldSet[field] = struct{}{}
-		}
-		definition := strings.Join(grouping.Fields, "\x00")
-		if _, exists := definitions[definition]; exists {
-			return RuleConfig{}, fmt.Errorf("groupings[%d]: duplicate grouping definition", index)
-		}
-		groupingIDs[grouping.ID] = struct{}{}
-		definitions[definition] = struct{}{}
-		result.Groupings = append(result.Groupings, GroupingConfig{
-			ID:     grouping.ID,
-			Fields: append([]string(nil), grouping.Fields...),
-		})
-	}
-	return result, nil
+	return RuleConfig{ID: raw.ID, PathRegex: *raw.PathRegex, Window: window, Threshold: *raw.Threshold, GroupBy: *raw.GroupBy}, nil
 }
 
 func defaultEngine() EngineConfig {
-	return EngineConfig{
-		LiveEventLateness: defaultLiveEventLateness,
-		Rules: []RuleConfig{{
-			ID:                  "homepage",
-			Window:              defaultWindow,
-			Threshold:           defaultThreshold,
-			SuspiciousThreshold: defaultSuspicious,
-			Groupings:           []GroupingConfig{{ID: "by_ip", Fields: []string{"ip"}}},
-		}},
-	}
+	return EngineConfig{Rules: []RuleConfig{{
+		ID: "homepage", PathRegex: defaultPathRegex, Window: defaultWindow,
+		Threshold: defaultThreshold, GroupBy: "ip",
+	}}}
 }
 
 func validateID(id string) error {

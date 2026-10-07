@@ -13,7 +13,7 @@ mode and does not block requests or modify the firewall.
 - parsing log lines into typed request events;
 - exact sliding-window analysis using log timestamps;
 - configurable request-count threshold and time window;
-- IP, User-Agent, and combined groupings;
+- one configurable grouping field per rule;
 - structured dry-run detections;
 - graceful shutdown on SIGINT and SIGTERM;
 - automatic expiration of inactive rule groups during live tailing;
@@ -51,18 +51,6 @@ Existing configuration and SQLite data are preserved when the installer is run
 again. The server does not need Git, Go, GCC, or the project source code. Install
 a specific release with `--version v0.1.0`.
 
-## Local demo
-
-The demo runs directly from the source tree without systemd or configuration:
-
-```shell
-sudo apt-get update && sudo apt-get install -y golang-go gcc
-./scripts/demo.sh
-```
-
-It needs no configuration or systemd installation. Press `Ctrl+C` to stop; the
-generated log, config, SQLite database, and service log remain in `runtime/demo/`.
-
 ## Configuration and service control
 
 Edit `/etc/antiddos/config.json` when its defaults do not match the server.
@@ -76,14 +64,10 @@ Minimal example:
   "engine": {
     "rules": [{
       "id": "homepage",
+      "path_regex": "^/$",
       "window": "5s",
       "threshold": 5,
-      "suspicious_threshold": 0,
-      "groupings": [
-        {"id": "by_ip", "fields": ["ip"]},
-        {"id": "by_user_agent", "fields": ["user_agent"]},
-        {"id": "by_ip_user_agent", "fields": ["ip", "user_agent"]}
-      ]
+      "group_by": "ip"
     }]
   }
 }
@@ -128,13 +112,10 @@ available for development with `antiddos run`.
 
 The template is [deploy/config.example.json](deploy/config.example.json).
 Systemd uses `/etc/antiddos/config.json`.
-In live mode (`start_position: "end"`), `engine.live_event_lateness` defaults
-to `30s`. It is the accepted delay between an event timestamp and wall clock;
-after that watermark advances, older events are counted as late and excluded.
-This bounded delay lets the service release expired groups during quiet periods
-without advancing the event-time frontier. Historical mode
-(`start_position: "beginning"` or `--from-start`) disables wall-clock expiry
-and uses only timestamps from the replayed log.
+In live mode (`start_position: "end"`), expired groups are released from memory
+every second, including while the input log is quiet. Historical mode
+(`start_position: "beginning"` or `--from-start`) uses only timestamps from the
+replayed log and does not advance cleanup from wall-clock time.
 `database_path` selects the SQLite file and defaults to
 `/var/lib/antiddos/antiddos.sqlite`, which is writable by the supplied systemd
 unit through `StateDirectory=antiddos`.
@@ -153,10 +134,9 @@ database file is restricted to the service account.
 `interval_seconds` gives its duration. No separate last-update timestamp is
 stored because it can be derived from the interval boundaries.
 
-Each detection stores one `group_values_json` field for the value or values
-that identify the group, along with `grouping_id` to say which grouping was
-used. Every request at or above the main threshold is recorded. Detections run in
-dry-run mode and do not mean a request was blocked.
+Each detection stores the selected `group_by` field in `grouping_id` and its
+single value in `group_values_json`. Every request at or above the threshold is
+recorded. Detections run in dry-run mode and do not mean a request was blocked.
 
 Example query for recent traffic buckets:
 
@@ -168,7 +148,7 @@ sqlite3 /var/lib/antiddos/antiddos.sqlite \
   <<'SQL'
 SELECT datetime(bucket_start_unix, 'unixepoch'),
        1.0 * requests / interval_seconds AS requests_per_second,
-       homepage_requests, response_bytes, known_response_byte_rows,
+       matched_requests, response_bytes, known_response_byte_rows,
        CASE WHEN known_response_byte_rows = 0 THEN NULL
             ELSE 1.0 * response_bytes / known_response_byte_rows END AS average_response_bytes
 FROM traffic_samples ORDER BY bucket_start_unix DESC LIMIT 20;
@@ -183,25 +163,25 @@ FROM detections ORDER BY event_time_unix_ns DESC LIMIT 50;
 SQL
 ```
 
-The current rule counts `GET /` requests, including query parameters, in the
-exact `(t-W, t]` window:
+Each rule counts matching `GET` requests in the exact `(t-W, t]` window:
 
+- `path_regex` is matched against the parsed URL path only; query parameters
+  are deliberately excluded, so `^/$` matches both `/` and `/?key=value`;
 - `window` sets `W`;
 - `threshold` sets the violation threshold `N`;
-- Early-warning (`suspicious`) detections are disabled; only the main threshold
-  produces detection records.
+- `group_by` selects exactly one of `ip`, `user_agent`, `method`, `path`, or
+  `status`.
 
 The fifth request triggers when `N=5`. The sixth and every later request also
 produce detections while the exact window count remains at least five. Once the
 count falls below five, detections stop until it reaches the threshold again.
 
-Groupings use one or more fields: `ip`, `user_agent`, `method`, `path`, and
-`status`. Each rule and grouping has independent window state.
+Each rule has its own path expression, grouping field, and independent window
+state.
 
 Events are processed immediately in the order read from the log. An event with
 a timestamp earlier than the last processed event is excluded from rule windows
-and counted as late. In live mode, events older than the configured wall-clock
-lateness watermark are also excluded; replay mode has no wall-clock watermark.
+and counted as late.
 
 ## Publishing a release
 
@@ -227,9 +207,9 @@ that release automatically through the `releases/latest/download` URL.
 - [x] Daemon and systemd unit.
 - [x] Continuous Nginx log reader.
 - [x] Nginx parser and typed request events.
-- [x] Homepage rule and exact sliding window.
-- [x] Configurable and combined groupings.
-- [x] Structured detections for every request at or above the main threshold.
+- [x] Configurable path rules and exact sliding windows.
+- [x] One configurable grouping field per rule.
+- [x] Structured detections for every request at or above the threshold.
 - [x] Metrics and SQLite persistence.
 - [x] Terminal monitoring of SQLite traffic and detections.
 - [x] Installation script.

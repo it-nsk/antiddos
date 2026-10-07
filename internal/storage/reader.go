@@ -79,7 +79,7 @@ func (r *Reader) Traffic(ctx context.Context, limit int) ([]metrics.Sample, erro
 		return nil, fmt.Errorf("limit must be between 1 and 1000")
 	}
 	rows, err := r.db.QueryContext(ctx, `SELECT bucket_start_unix, interval_seconds,
-		requests, homepage_requests, response_bytes, known_response_byte_rows
+		requests, matched_requests, response_bytes, known_response_byte_rows
 		FROM traffic_samples ORDER BY bucket_start_unix DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -88,7 +88,7 @@ func (r *Reader) Traffic(ctx context.Context, limit int) ([]metrics.Sample, erro
 	result := make([]metrics.Sample, 0)
 	for rows.Next() {
 		var s metrics.Sample
-		if err := rows.Scan(&s.BucketStartUnix, &s.IntervalSeconds, &s.Requests, &s.HomepageRequests,
+		if err := rows.Scan(&s.BucketStartUnix, &s.IntervalSeconds, &s.Requests, &s.MatchedRequests,
 			&s.ResponseBytes, &s.KnownResponseByteRows); err != nil {
 			return nil, err
 		}

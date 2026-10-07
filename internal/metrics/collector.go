@@ -15,7 +15,7 @@ type Sample struct {
 	BucketStartUnix       int64
 	IntervalSeconds       int64
 	Requests              int64
-	HomepageRequests      int64
+	MatchedRequests       int64
 	ResponseBytes         int64
 	KnownResponseByteRows int64
 }
@@ -32,15 +32,15 @@ func NewCollector() *Collector {
 	return &Collector{samples: make(map[int64]Sample)}
 }
 
-func (collector *Collector) Add(event request.Event, homepage bool) {
+func (collector *Collector) Add(event request.Event, matched bool) {
 	intervalSeconds := int64(SampleInterval / time.Second)
 	bucketStart := event.Timestamp.Unix() / intervalSeconds * intervalSeconds
 	sample := collector.samples[bucketStart]
 	sample.BucketStartUnix = bucketStart
 	sample.IntervalSeconds = intervalSeconds
 	sample.Requests++
-	if homepage {
-		sample.HomepageRequests++
+	if matched {
+		sample.MatchedRequests++
 	}
 	if event.ResponseBytes != nil {
 		sample.ResponseBytes += *event.ResponseBytes
