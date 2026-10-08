@@ -84,6 +84,7 @@ func parseRunFlags(args []string, out io.Writer) (runOptions, error) {
 type monitorOptions struct {
 	Config string
 	Once   bool
+	Limit  int
 }
 
 func monitor(ctx context.Context, args []string, out io.Writer) error {
@@ -94,11 +95,15 @@ func monitor(ctx context.Context, args []string, out io.Writer) error {
 	f.SetOutput(out)
 	f.StringVar(&o.Config, "config", o.Config, "configuration file")
 	f.BoolVar(&o.Once, "once", false, "print one snapshot and exit")
+	f.IntVar(&o.Limit, "limit", 20, "number of traffic intervals and detections to show (1-1000)")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
 	if f.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %v", f.Args())
+	}
+	if o.Limit < 1 || o.Limit > 1000 {
+		return fmt.Errorf("--limit must be between 1 and 1000")
 	}
 
 	cfg, err := monitorConfig(o)
@@ -113,22 +118,22 @@ func monitor(ctx context.Context, args []string, out io.Writer) error {
 	defer database.Close()
 
 	show := func() error {
-		traffic, err := database.Traffic(ctx, 20)
+		traffic, err := database.Traffic(ctx, o.Limit)
 		if err != nil {
 			return err
 		}
-		alerts, err := database.Detections(ctx, 20)
+		alerts, err := database.Detections(ctx, o.Limit)
 		if err != nil {
 			return err
 		}
 		if !o.Once {
 			clearTerminal(out)
 		}
-		fmt.Fprintf(out, "Log: %s\nDatabase: %s\nUpdated: %s\n\nTRAFFIC (latest 20 intervals)\n", cfg.LogFile, path, time.Now().Format(time.RFC3339))
+		fmt.Fprintf(out, "Log: %s\nDatabase: %s\nUpdated: %s\n\nTRAFFIC (latest %d intervals)\n", cfg.LogFile, path, time.Now().Format(time.RFC3339), o.Limit)
 		if err := printTraffic(out, traffic); err != nil {
 			return err
 		}
-		fmt.Fprintln(out, "\nDETECTIONS (latest 20)")
+		fmt.Fprintf(out, "\nDETECTIONS (latest %d)\n", o.Limit)
 		return printAlerts(out, alerts)
 	}
 

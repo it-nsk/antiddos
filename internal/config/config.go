@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 	"unicode"
 )
@@ -28,7 +30,10 @@ type Config struct {
 	Engine        EngineConfig
 }
 
-type EngineConfig struct{ Rules []RuleConfig }
+type EngineConfig struct {
+	Rules     []RuleConfig
+	IgnoreIPs []string
+}
 
 type RuleConfig struct {
 	ID        string
@@ -46,7 +51,8 @@ type rawConfig struct {
 }
 
 type rawEngineConfig struct {
-	Rules []rawRuleConfig `json:"rules"`
+	Rules     []rawRuleConfig `json:"rules"`
+	IgnoreIPs []string        `json:"ignore_ips"`
 }
 
 type rawRuleConfig struct {
@@ -129,7 +135,19 @@ func parseEngine(data json.RawMessage) (EngineConfig, error) {
 	if len(raw.Rules) == 0 {
 		return EngineConfig{}, fmt.Errorf("engine.rules must contain at least one rule")
 	}
-	result := EngineConfig{Rules: make([]RuleConfig, 0, len(raw.Rules))}
+	result := EngineConfig{Rules: make([]RuleConfig, 0, len(raw.Rules)), IgnoreIPs: make([]string, 0, len(raw.IgnoreIPs))}
+	for index, value := range raw.IgnoreIPs {
+		value = strings.TrimSpace(value)
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			if address, addressErr := netip.ParseAddr(value); addressErr == nil {
+				prefix = netip.PrefixFrom(address, address.BitLen())
+			} else {
+				return EngineConfig{}, fmt.Errorf("engine.ignore_ips[%d]: invalid IP or CIDR %q", index, value)
+			}
+		}
+		result.IgnoreIPs = append(result.IgnoreIPs, prefix.Masked().String())
+	}
 	ruleIDs := make(map[string]struct{}, len(raw.Rules))
 	for index, rule := range raw.Rules {
 		parsed, err := parseRule(rule)

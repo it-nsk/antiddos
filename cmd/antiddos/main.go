@@ -56,6 +56,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	liveTail := cfg.StartPosition == string(reader.StartAtEnd)
 	ruleEngine, err := engine.NewWithOptions(rules, engine.Options{
 		LiveClock: liveTail,
+		IgnoreIPs: cfg.Engine.IgnoreIPs,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize rule engine: %w", err)
@@ -131,6 +132,9 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	}()
 
 	processEvent := func(event request.Event) error {
+		if ruleEngine.IsIgnored(event) {
+			return nil
+		}
 		if ruleEngine.IsLate(event.Timestamp) {
 			statistics.lateEvents++
 			if ruleEngine.Matches(event) {
