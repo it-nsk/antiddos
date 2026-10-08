@@ -34,8 +34,18 @@ The installer downloads the latest GitHub Release, verifies its SHA256 checksum,
 creates the `antiddos` account, installs the binary, example configuration and
 systemd unit, enables and starts the service, creates the SQLite database, and
 verifies that the terminal monitor can read it.
+On first install it creates `/etc/antiddos/config.json` from the example; later
+installer runs preserve an existing configuration.
 `monitor` refreshes every two seconds; exit it with `Ctrl+C`. The systemd
 service continues running in the background.
+
+If the daemon is running and you need to change a setting, for example to add
+an IP to the whitelist:
+
+```shell
+sudoedit /etc/antiddos/config.json
+sudo systemctl restart antiddos
+```
 
 Installation and runtime paths:
 
@@ -96,12 +106,15 @@ Watch both SQLite tables in the terminal:
 
 ```shell
 sudo -u antiddos /usr/local/bin/antiddos monitor
+sudo -u antiddos /usr/local/bin/antiddos monitor --limit 100
 ```
 
-`monitor` refreshes every two seconds and shows the latest 20 traffic intervals
-and latest 20 detections. Use `Ctrl+C` to leave monitoring; the service keeps
-running. Use `monitor --once` for one snapshot. It opens SQLite read-only and
-does not require the external `sqlite3` command.
+`monitor` refreshes every two seconds. By default it shows the latest 20 traffic
+intervals and 20 detections. Pass `--limit N` to change both row limits, for
+example `--limit 100`; valid values are 1–1000. The refresh interval stays two
+seconds regardless of the limit. Use `Ctrl+C` to leave monitoring; the service
+keeps running. Use `monitor --once` for one snapshot. It opens SQLite read-only
+and does not require the external `sqlite3` command.
 
 The binary uses `ANTIDDOS_CONFIG` and `ANTIDDOS_LOG_FILE`. The supplied systemd
 unit sets `ANTIDDOS_CONFIG` to `/etc/antiddos/config.json` and reads the optional
@@ -178,6 +191,22 @@ count falls below five, detections stop until it reaches the threshold again.
 
 Each rule has its own path expression, grouping field, and independent window
 state.
+
+`engine.ignore_ips` accepts individual IPv4 and IPv6 addresses, plus CIDR
+prefixes for either address family. It does not resolve DNS names or load
+external files. Ignored requests remain in traffic statistics, including
+rule-matched counts, but do not enter rule windows or produce detections.
+Add the addresses and networks to the `ignore_ips` array, replacing these
+documentation-only examples with the addresses used by your server:
+
+```json
+"ignore_ips": [
+  "192.0.2.10",
+  "198.51.100.0/24",
+  "2001:db8::1",
+  "2001:db8:1::/48"
+]
+```
 
 Events are processed immediately in the order read from the log. An event with
 a timestamp earlier than the last processed event is excluded from rule windows

@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"regexp"
+	"strings"
 	"time"
 	"unicode"
 
@@ -16,6 +18,7 @@ import (
 const (
 	ruleSemanticsVersion = "get-path-regex-v1"
 	minimumMapShrinkSize = 4096
+	ipv4MappedPrefixBits = 96
 )
 
 type Rule struct {
@@ -51,6 +54,7 @@ type Evaluation struct {
 
 type Engine struct {
 	rules           []compiledRule
+	ignoreIPs       []netip.Prefix
 	frontier        time.Time
 	hasFrontier     bool
 	liveClock       bool
@@ -58,7 +62,10 @@ type Engine struct {
 	hasCleanupClock bool
 }
 
-type Options struct{ LiveClock bool }
+type Options struct {
+	LiveClock bool
+	IgnoreIPs []string
+}
 
 type compiledRule struct {
 	id        string
@@ -85,6 +92,27 @@ func NewWithOptions(rules []Rule, options Options) (*Engine, error) {
 		return nil, fmt.Errorf("at least one rule is required")
 	}
 	result := &Engine{rules: make([]compiledRule, 0, len(rules)), liveClock: options.LiveClock}
+	for index, value := range options.IgnoreIPs {
+		value = strings.TrimSpace(value)
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			if address, addressErr := netip.ParseAddr(value); addressErr == nil {
+				prefix = netip.PrefixFrom(address, address.BitLen())
+			} else {
+				return nil, fmt.Errorf("ignore_ips[%d]: invalid IP or CIDR %q", index, value)
+			}
+		}
+		prefix = prefix.Masked()
+		if prefix.Addr().Is4In6() {
+			if prefix.Bits() < ipv4MappedPrefixBits {
+				return nil, fmt.Errorf("ignore_ips[%d]: invalid IPv4-mapped prefix %q", index, value)
+			}
+			// The first 96 bits identify the IPv4-mapped IPv6 range; the
+			// remaining prefix bits are the original IPv4 network mask.
+			prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-ipv4MappedPrefixBits)
+		}
+		result.ignoreIPs = append(result.ignoreIPs, prefix)
+	}
 	ruleIDs := make(map[string]struct{}, len(rules))
 	for index, rule := range rules {
 		compiled, err := compileRule(rule)
@@ -131,6 +159,9 @@ func compileRule(rule Rule) (compiledRule, error) {
 
 // Process and AdvanceWallClock must be called by the same owner goroutine.
 func (engine *Engine) Process(event request.Event) ([]Evaluation, error) {
+	if engine.IsIgnored(event) {
+		return nil, nil
+	}
 	timestamp := event.Timestamp.UTC()
 	if engine.IsLate(timestamp) {
 		return nil, fmt.Errorf("event timestamp %s is before the accepted event-time watermark", timestamp.Format(time.RFC3339Nano))
@@ -174,6 +205,20 @@ func (engine *Engine) Process(event request.Event) ([]Evaluation, error) {
 		evaluations = append(evaluations, evaluation)
 	}
 	return evaluations, nil
+}
+
+func (engine *Engine) IsIgnored(event request.Event) bool {
+	address := event.IP
+	if !address.IsValid() {
+		return false
+	}
+	address = address.Unmap()
+	for _, prefix := range engine.ignoreIPs {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
 }
 
 func (engine *Engine) Matches(event request.Event) bool {
