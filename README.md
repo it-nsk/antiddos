@@ -72,6 +72,7 @@ Minimal example:
   "database_path": "/var/lib/antiddos/antiddos.sqlite",
   "start_position": "end",
   "engine": {
+    "ignore_ips": [],
     "rules": [{
       "id": "homepage",
       "path_regex": "^/$",
