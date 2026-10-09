@@ -1,6 +1,6 @@
 [Unit]
 Description=AntiDDoS access log analyzer
-After=local-fs.target
+After=local-fs.target nftables.service
 
 [Service]
 Type=simple
@@ -8,14 +8,25 @@ User=antiddos
 Group=antiddos
 Environment=ANTIDDOS_CONFIG=/etc/antiddos/config.json
 EnvironmentFile=-/etc/default/antiddos
-ExecStart=/usr/local/bin/antiddos run
+ExecStart=/usr/local/bin/antiddos launch
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=10s
 NoNewPrivileges=true
+# nftables mode needs host firewall access; launch drops it in dry_run mode.
+# CAP_NET_ADMIN is broad network administration access, not set-specific.
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
 PrivateTmp=true
+PrivateDevices=true
 ProtectHome=true
 ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
 StateDirectory=antiddos
 StateDirectoryMode=0700
 

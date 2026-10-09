@@ -8,19 +8,24 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 	"unicode"
 
+	"github.com/it-nsk/antiddos/internal/action"
+	"github.com/it-nsk/antiddos/internal/app"
+	"github.com/it-nsk/antiddos/internal/blockpolicy"
 	"github.com/it-nsk/antiddos/internal/config"
 	"github.com/it-nsk/antiddos/internal/metrics"
 	"github.com/it-nsk/antiddos/internal/storage"
 )
 
 const usage = `Usage:
-  antiddos run [OPTIONS]       run the analyzer (used by systemd)
-  antiddos monitor [OPTIONS]   show traffic and detections from SQLite
+  antiddos run [OPTIONS]       run the analyzer directly
+  antiddos monitor [OPTIONS]   show traffic, detections, and active blocks
 
 The systemd service reads /etc/antiddos/config.json. Values from
 /etc/default/antiddos can override its paths:
@@ -42,6 +47,8 @@ func executeCommand(ctx context.Context, args []string, logger *slog.Logger, out
 
 	var err error
 	switch args[0] {
+	case "launch":
+		err = launch(ctx, args[1:], logger)
 	case "run":
 		err = run(ctx, args, logger)
 	case "monitor":
@@ -53,6 +60,55 @@ func executeCommand(ctx context.Context, args []string, logger *slog.Logger, out
 		return nil
 	}
 	return err
+}
+
+// launch is the systemd entry point. It drops CAP_NET_ADMIN before starting
+// the ordinary daemon in dry-run mode and initializes only our nftables objects
+// when enforcement is explicitly enabled.
+func launch(ctx context.Context, args []string, logger *slog.Logger) error {
+	options, err := parseRunFlags(args, os.Stderr)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.LoadWithLogFile(options.Config, options.LogFile)
+	if err != nil {
+		return err
+	}
+	if _, err := blockpolicy.New(cfg.BlockDuration); err != nil {
+		return fmt.Errorf("validate block policy: %w", err)
+	}
+	if cfg.BlockMode == config.BlockModeDryRun {
+		setpriv, err := exec.LookPath("setpriv")
+		if err != nil {
+			return fmt.Errorf("dry-run startup requires util-linux setpriv to drop CAP_NET_ADMIN: %w", err)
+		}
+		binary, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("locate antiddos executable: %w", err)
+		}
+		childArgs := []string{setpriv, "--no-new-privs", "--inh-caps=-net_admin", "--ambient-caps=-net_admin", "--", binary, "run"}
+		childArgs = append(childArgs, args...)
+		return syscall.Exec(setpriv, childArgs, os.Environ())
+	}
+	nftables := &action.NFTables{}
+	if err := nftables.Initialize(ctx); err != nil {
+		return fmt.Errorf("initialize nftables blocking: %w", err)
+	}
+	return app.Run(ctx, app.RunOptions{
+		Config: options.Config, LogFile: options.LogFile,
+		FromStart: options.FromStart, PrintLines: options.PrintLines, PrintEvents: options.PrintEvents,
+	}, logger)
+}
+
+func run(ctx context.Context, args []string, logger *slog.Logger) error {
+	options, err := parseRunFlags(args[1:], os.Stderr)
+	if err != nil {
+		return err
+	}
+	return app.Run(ctx, app.RunOptions{
+		Config: options.Config, LogFile: options.LogFile,
+		FromStart: options.FromStart, PrintLines: options.PrintLines, PrintEvents: options.PrintEvents,
+	}, logger)
 }
 
 type runOptions struct {
@@ -95,7 +151,7 @@ func monitor(ctx context.Context, args []string, out io.Writer) error {
 	f.SetOutput(out)
 	f.StringVar(&o.Config, "config", o.Config, "configuration file")
 	f.BoolVar(&o.Once, "once", false, "print one snapshot and exit")
-	f.IntVar(&o.Limit, "limit", 20, "number of traffic intervals and detections to show (1-1000)")
+	f.IntVar(&o.Limit, "limit", 20, "number of traffic intervals, detections, and active blocks to show (1-1000)")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -118,6 +174,7 @@ func monitor(ctx context.Context, args []string, out io.Writer) error {
 	defer database.Close()
 
 	show := func() error {
+		now := time.Now()
 		traffic, err := database.Traffic(ctx, o.Limit)
 		if err != nil {
 			return err
@@ -126,15 +183,23 @@ func monitor(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		blocks, err := database.ActiveBlocks(ctx, now, o.Limit)
+		if err != nil {
+			return err
+		}
 		if !o.Once {
 			clearTerminal(out)
 		}
-		fmt.Fprintf(out, "Log: %s\nDatabase: %s\nUpdated: %s\n\nTRAFFIC (latest %d intervals)\n", cfg.LogFile, path, time.Now().Format(time.RFC3339), o.Limit)
+		fmt.Fprintf(out, "Log: %s\nDatabase: %s\nUpdated: %s\n\nTRAFFIC (latest %d intervals)\n", cfg.LogFile, path, now.Format(time.RFC3339), o.Limit)
 		if err := printTraffic(out, traffic); err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "\nDETECTIONS (latest %d)\n", o.Limit)
-		return printAlerts(out, alerts)
+		if err := printAlerts(out, alerts); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "\nBLOCKS (active, latest %d)\n", o.Limit)
+		return printBlocks(out, blocks, now)
 	}
 
 	if err := show(); err != nil || o.Once {
@@ -152,6 +217,19 @@ func monitor(ctx context.Context, args []string, out io.Writer) error {
 			}
 		}
 	}
+}
+
+func printBlocks(out io.Writer, rows []storage.BlockRow, now time.Time) error {
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "IP\tRULE\tBLOCKED AT\tEXPIRES AT\tREMAINING")
+	for _, row := range rows {
+		remaining := row.ExpiresAt.Sub(now).Round(time.Second)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", row.IP, safeText(row.RuleID), row.StartedAt.Format(time.RFC3339), row.ExpiresAt.Format(time.RFC3339), remaining)
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(w, "(no active blocks)")
+	}
+	return w.Flush()
 }
 
 func monitorConfig(o monitorOptions) (config.Config, error) {

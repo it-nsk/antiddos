@@ -76,7 +76,7 @@ fi
 
 for command in curl tar sha256sum install mktemp getent groupadd useradd usermod \
     chown chmod systemctl runuser journalctl sed head tail stat dirname mv rm \
-    sleep uname; do
+    sleep uname setpriv; do
     command -v "$command" >/dev/null || fail "required command is not installed: $command"
 done
 
