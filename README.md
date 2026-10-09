@@ -23,7 +23,8 @@ optional temporary IP blocking through a dedicated nftables table.
 ## Quick start
 
 On a Linux amd64 server, replace the path with the Nginx access log that should
-be monitored:
+be monitored. The first install creates `/etc/antiddos/config.json` from the
+example configuration and starts the service in safe `dry_run` mode:
 
 ```shell
 curl -fsSL https://raw.githubusercontent.com/it-nsk/antiddos/dev/scripts/install.sh -o /tmp/antiddos-install.sh
@@ -32,21 +33,23 @@ sudo -u antiddos /usr/local/bin/antiddos monitor
 ```
 
 The installer downloads the latest GitHub Release, verifies its SHA256 checksum,
-creates the `antiddos` account, installs the binary, example configuration and
-systemd unit, enables and starts the service, creates the SQLite database, and
-verifies that the terminal monitor can read it.
-On first install it creates `/etc/antiddos/config.json` from the example; later
-installer runs preserve an existing configuration.
-`monitor` refreshes every two seconds; exit it with `Ctrl+C`. The systemd
-service continues running in the background.
+and installs and starts the service. `monitor` refreshes every two seconds; exit
+it with `Ctrl+C`. The service continues running in the background.
 
-If the daemon is running and you need to change a setting, for example to add
-an IP to the whitelist:
+The example config uses an empty `engine.ignore_ips` whitelist and `dry_run`,
+which records detections without changing the firewall. To edit settings, such
+as the whitelist, or enable real blocking, change `/etc/antiddos/config.json`
+and restart the service:
 
 ```shell
 sudoedit /etc/antiddos/config.json
 sudo systemctl restart antiddos
 ```
+
+Set `block_mode` to `nftables` for real IPv4/IPv6 blocking, and set
+`block_duration` to a whole number of minutes from `1m` to `60m`. Only rules
+with `group_by: "ip"` block clients. Use `dry_run` to return to observation
+mode. Existing config files are preserved by later installer runs.
 
 Installation and runtime paths:
 
