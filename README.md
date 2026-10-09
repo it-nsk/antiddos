@@ -2,8 +2,8 @@
 
 Monitoring and blocking suspicious activity on your webserver
 
-Go service for analyzing Nginx access logs. The current MVP works in dry-run
-mode and does not block requests or modify the firewall.
+Go service for analyzing Nginx access logs. It supports dry-run monitoring and
+optional temporary IP blocking through a dedicated nftables table.
 
 ## Implemented
 
@@ -15,6 +15,7 @@ mode and does not block requests or modify the firewall.
 - configurable request-count threshold and time window;
 - one configurable grouping field per rule;
 - structured dry-run detections;
+- optional IPv4/IPv6 blocking with short nftables timeouts;
 - graceful shutdown on SIGINT and SIGTERM;
 - automatic expiration of inactive rule groups during live tailing;
 - terminal monitoring of traffic and detections stored in SQLite.
@@ -71,6 +72,8 @@ Minimal example:
   "log_file": "/var/log/nginx/access.log",
   "database_path": "/var/lib/antiddos/antiddos.sqlite",
   "start_position": "end",
+  "block_mode": "dry_run",
+  "block_duration": "5m",
   "engine": {
     "ignore_ips": [],
     "rules": [{
@@ -90,6 +93,26 @@ Apply configuration changes with:
 sudo systemctl restart antiddos
 ```
 
+To enable firewall blocking, install the `nftables` package and change
+`block_mode` to `nftables`. Keep `group_by` set to `ip` for rules that should
+block a client. `block_duration` accepts whole minutes from `1m` to `60m`;
+repeated detections do not extend an existing timeout. Other grouping fields
+still produce detections but are skipped by the blocking policy. Restart the
+service to apply the change. The systemd service runs as `antiddos` and receives
+the Linux `CAP_NET_ADMIN` capability (system permission to manage network
+firewall settings) only through its restricted service unit. In `dry_run` mode,
+the launcher drops that capability before starting the analyzer.
+
+The daemon creates only its own `inet antiddos` table, timeout sets capped at
+65,535 addresses per IP family, and input/forward rules. It does not flush or
+rewrite other nftables tables. A conflicting table or incompatible set/chain
+makes startup fail with an error; reaching the set limit makes new block actions
+fail visibly instead of growing firewall memory without a bound.
+The rules drop matching addresses before they reach a local service or a
+forwarded/container destination. Use the actual client IP visible to Nginx and
+the host firewall when validating enforcement; requests through a proxy or
+container network can have a different source address.
+
 The log path can instead be overridden in `/etc/default/antiddos`:
 
 ```shell
@@ -103,7 +126,7 @@ sudo systemctl start antiddos
 sudo systemctl stop antiddos
 ```
 
-Watch both SQLite tables in the terminal:
+Watch traffic, detections, and active blocks in the terminal:
 
 ```shell
 sudo -u antiddos /usr/local/bin/antiddos monitor
@@ -111,11 +134,11 @@ sudo -u antiddos /usr/local/bin/antiddos monitor --limit 100
 ```
 
 `monitor` refreshes every two seconds. By default it shows the latest 20 traffic
-intervals and 20 detections. Pass `--limit N` to change both row limits, for
-example `--limit 100`; valid values are 1–1000. The refresh interval stays two
-seconds regardless of the limit. Use `Ctrl+C` to leave monitoring; the service
-keeps running. Use `monitor --once` for one snapshot. It opens SQLite read-only
-and does not require the external `sqlite3` command.
+intervals, 20 detections, and active block records. Pass `--limit N` to change
+the row limits, for example `--limit 100`; valid values are 1–1000. The refresh
+interval stays two seconds regardless of the limit. Use `Ctrl+C` to leave
+monitoring; the service keeps running. Use `monitor --once` for one snapshot. It
+opens SQLite read-only and does not require the external `sqlite3` command.
 
 The binary uses `ANTIDDOS_CONFIG` and `ANTIDDOS_LOG_FILE`. The supplied systemd
 unit sets `ANTIDDOS_CONFIG` to `/etc/antiddos/config.json` and reads the optional
@@ -134,9 +157,9 @@ replayed log and does not advance cleanup from wall-clock time.
 `/var/lib/antiddos/antiddos.sqlite`, which is writable by the supplied systemd
 unit through `StateDirectory=antiddos`.
 
-SQLite stores `traffic_samples` and `detections`. Traffic counters are grouped
-into 15-second buckets by the timestamp in the Nginx log. They are flushed to
-SQLite every 15 seconds of runtime; late events update the bucket matching
+SQLite stores `traffic_samples`, `detections`, and `active_blocks`. Traffic
+counters are grouped into 15-second buckets by the timestamp in the Nginx log.
+They are flushed to SQLite every 15 seconds of runtime; late events update the
 their log timestamp. Each traffic row contains request counts and the sum and
 known-value count for response bytes, so average response size and byte rate can
 be calculated without storing per-request rows. Detection rows are inserted
@@ -144,13 +167,25 @@ immediately for every request whose group is at or above the threshold and
 preserve the request timestamp and its timezone as written in the log. The
 database file is restricted to the service account.
 
+When nftables confirms a new block, its IP, rule, start time, and expiry are
+stored in `active_blocks`. `monitor` shows unexpired records in its `BLOCKS`
+section. Dry-run results and failed or skipped actions are not listed as active
+blocks. Repeated detections preserve the first expiry. On service startup in
+`nftables` mode, unexpired records are restored with only their remaining time.
+If an IP is now covered by `engine.ignore_ips`, startup removes it from the
+firewall set and deletes its block record. These configuration changes take
+effect when the service restarts. A firewall reset while the daemon is already
+running is not detected until the next restart.
+
 `traffic_samples.bucket_start_unix` identifies the start of each interval;
 `interval_seconds` gives its duration. No separate last-update timestamp is
 stored because it can be derived from the interval boundaries.
 
 Each detection stores the selected `group_by` field in `grouping_id` and its
 single value in `group_values_json`. Every request at or above the threshold is
-recorded. Detections run in dry-run mode and do not mean a request was blocked.
+recorded. In `dry_run` mode, detections report what would be blocked without
+changing firewall state. In `nftables` mode, eligible detections add the exact
+IP to the corresponding timed set.
 
 Example query for recent traffic buckets:
 

@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"path/filepath"
+	"time"
 
 	"github.com/it-nsk/antiddos/internal/metrics"
 )
@@ -47,6 +49,59 @@ type DetectionRow struct {
 	RequestCount     int64
 	WindowMillis     int64
 	Threshold        int64
+}
+
+type BlockRow struct {
+	IP        netip.Addr
+	RuleID    string
+	StartedAt time.Time
+	ExpiresAt time.Time
+}
+
+func (r *Reader) ActiveBlocks(ctx context.Context, now time.Time, limit int) ([]BlockRow, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, fmt.Errorf("limit must be between 1 and 1000")
+	}
+	return queryActiveBlocks(ctx, r.db, now, limit)
+}
+
+type rowsQuerier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func queryActiveBlocks(ctx context.Context, db rowsQuerier, now time.Time, limit int) ([]BlockRow, error) {
+	query := `SELECT ip, rule_id, started_at_unix_ms, expires_at_unix_ms
+		FROM active_blocks WHERE expires_at_unix_ms > ?
+		ORDER BY expires_at_unix_ms DESC, ip`
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		rows, err = db.QueryContext(ctx, query+` LIMIT ?`, now.UnixMilli(), limit)
+	} else {
+		rows, err = db.QueryContext(ctx, query, now.UnixMilli())
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]BlockRow, 0)
+	for rows.Next() {
+		var row BlockRow
+		var ip string
+		var startedAt, expiresAt int64
+		if err := rows.Scan(&ip, &row.RuleID, &startedAt, &expiresAt); err != nil {
+			return nil, err
+		}
+		address, err := netip.ParseAddr(ip)
+		if err != nil {
+			return nil, fmt.Errorf("read invalid stored block IP %q: %w", ip, err)
+		}
+		row.IP = address
+		row.StartedAt = time.UnixMilli(startedAt)
+		row.ExpiresAt = time.UnixMilli(expiresAt)
+		result = append(result, row)
+	}
+	return result, rows.Err()
 }
 
 func (r *Reader) Detections(ctx context.Context, limit int) ([]DetectionRow, error) {

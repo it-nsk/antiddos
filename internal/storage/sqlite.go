@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -98,6 +99,12 @@ func (store *Store) createSchema(ctx context.Context) error {
 			window_millis INTEGER NOT NULL CHECK (window_millis > 0),
 			threshold INTEGER NOT NULL CHECK (threshold > 0),
 			dry_run INTEGER NOT NULL CHECK (dry_run IN (0, 1))
+		)`,
+		`CREATE TABLE IF NOT EXISTS active_blocks (
+			ip TEXT PRIMARY KEY,
+			rule_id TEXT NOT NULL,
+			started_at_unix_ms INTEGER NOT NULL,
+			expires_at_unix_ms INTEGER NOT NULL CHECK (expires_at_unix_ms > started_at_unix_ms)
 		)`,
 	}
 	for _, statement := range statements {
@@ -334,6 +341,48 @@ func (store *Store) RecordDetection(ctx context.Context, detection engine.Detect
 	)
 	if err != nil {
 		return fmt.Errorf("record detection: %w", err)
+	}
+	return nil
+}
+
+// RecordBlock persists an applied firewall block. Calls for a newly applied
+// block replace an expired record for the same IP; duplicate actions must not
+// call this method, so their original expiry is preserved.
+func (store *Store) RecordBlock(ctx context.Context, ip netip.Addr, ruleID string, startedAt, expiresAt time.Time) error {
+	if !ip.IsValid() || ruleID == "" || !expiresAt.After(startedAt) {
+		return fmt.Errorf("invalid block record")
+	}
+	_, err := store.db.ExecContext(ctx, `INSERT INTO active_blocks (
+		ip, rule_id, started_at_unix_ms, expires_at_unix_ms
+	) VALUES (?, ?, ?, ?)
+	ON CONFLICT(ip) DO UPDATE SET
+		rule_id = excluded.rule_id,
+		started_at_unix_ms = excluded.started_at_unix_ms,
+		expires_at_unix_ms = excluded.expires_at_unix_ms`,
+		ip.Unmap().String(), ruleID, startedAt.UnixMilli(), expiresAt.UnixMilli())
+	if err != nil {
+		return fmt.Errorf("record active block for %s: %w", ip, err)
+	}
+	return nil
+}
+
+func (store *Store) PruneExpiredBlocks(ctx context.Context, now time.Time) error {
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM active_blocks WHERE expires_at_unix_ms <= ?`, now.UnixMilli()); err != nil {
+		return fmt.Errorf("prune expired block records: %w", err)
+	}
+	return nil
+}
+
+func (store *Store) UnexpiredBlocks(ctx context.Context, now time.Time) ([]BlockRow, error) {
+	return queryActiveBlocks(ctx, store.db, now, 0)
+}
+
+func (store *Store) DeleteBlock(ctx context.Context, ip netip.Addr) error {
+	if !ip.IsValid() {
+		return fmt.Errorf("invalid block IP")
+	}
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM active_blocks WHERE ip = ?`, ip.Unmap().String()); err != nil {
+		return fmt.Errorf("delete active block record for %s: %w", ip, err)
 	}
 	return nil
 }

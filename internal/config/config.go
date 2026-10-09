@@ -16,6 +16,13 @@ import (
 
 const DefaultPath = "/etc/antiddos/config.json"
 const DefaultDatabasePath = "/var/lib/antiddos/antiddos.sqlite"
+const DefaultBlockMode = "dry_run"
+const DefaultBlockDuration = 5 * time.Minute
+
+const (
+	BlockModeDryRun   = "dry_run"
+	BlockModeNFTables = "nftables"
+)
 
 const (
 	defaultPathRegex = `^/$`
@@ -27,6 +34,8 @@ type Config struct {
 	LogFile       string
 	DatabasePath  string
 	StartPosition string
+	BlockMode     string
+	BlockDuration time.Duration
 	Engine        EngineConfig
 }
 
@@ -47,6 +56,8 @@ type rawConfig struct {
 	LogFile       string          `json:"log_file"`
 	DatabasePath  string          `json:"database_path"`
 	StartPosition string          `json:"start_position"`
+	BlockMode     string          `json:"block_mode"`
+	BlockDuration string          `json:"block_duration"`
 	Engine        json.RawMessage `json:"engine"`
 }
 
@@ -113,9 +124,23 @@ func decode(input io.Reader, path, logFile string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("config %q: %w", path, err)
 	}
+	blockMode := raw.BlockMode
+	if blockMode == "" {
+		blockMode = DefaultBlockMode
+	}
+	if blockMode != BlockModeDryRun && blockMode != BlockModeNFTables {
+		return Config{}, fmt.Errorf("config %q: block_mode must be %q or %q", path, BlockModeDryRun, BlockModeNFTables)
+	}
+	blockDuration := DefaultBlockDuration
+	if raw.BlockDuration != "" {
+		blockDuration, err = time.ParseDuration(raw.BlockDuration)
+		if err != nil {
+			return Config{}, fmt.Errorf("config %q: block_duration: %w", path, err)
+		}
+	}
 	return Config{
 		LogFile: filepath.Clean(raw.LogFile), DatabasePath: filepath.Clean(raw.DatabasePath),
-		StartPosition: raw.StartPosition, Engine: engineConfig,
+		StartPosition: raw.StartPosition, BlockMode: blockMode, BlockDuration: blockDuration, Engine: engineConfig,
 	}, nil
 }
 
