@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/it-nsk/antiddos/internal/app"
 	"github.com/it-nsk/antiddos/internal/blockpolicy"
 	"github.com/it-nsk/antiddos/internal/config"
+	"github.com/it-nsk/antiddos/internal/control"
 	"github.com/it-nsk/antiddos/internal/metrics"
 	"github.com/it-nsk/antiddos/internal/storage"
 )
@@ -26,6 +28,7 @@ import (
 const usage = `Usage:
   antiddos run [OPTIONS]       run the analyzer directly
   antiddos monitor [OPTIONS]   show traffic, detections, and active blocks
+  antiddos unblock IP          remove one IP from the firewall block set
 
 The systemd service reads /etc/antiddos/config.json. Values from
 /etc/default/antiddos can override its paths:
@@ -53,6 +56,8 @@ func executeCommand(ctx context.Context, args []string, logger *slog.Logger, out
 		err = run(ctx, args, logger)
 	case "monitor":
 		err = monitor(ctx, args[1:], out)
+	case "unblock":
+		err = unblock(ctx, args[1:], out)
 	default:
 		err = fmt.Errorf("unknown command %q; use antiddos --help", args[0])
 	}
@@ -90,14 +95,34 @@ func launch(ctx context.Context, args []string, logger *slog.Logger) error {
 		childArgs = append(childArgs, args...)
 		return syscall.Exec(setpriv, childArgs, os.Environ())
 	}
-	nftables := &action.NFTables{}
+	nftables := &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}
 	if err := nftables.Initialize(ctx); err != nil {
 		return fmt.Errorf("initialize nftables blocking: %w", err)
 	}
 	return app.Run(ctx, app.RunOptions{
 		Config: options.Config, LogFile: options.LogFile,
-		FromStart: options.FromStart, PrintLines: options.PrintLines, PrintEvents: options.PrintEvents,
+		ControlSocketPath: control.DefaultSocketPath,
+		FromStart:         options.FromStart, PrintLines: options.PrintLines, PrintEvents: options.PrintEvents,
 	}, logger)
+}
+
+func unblock(ctx context.Context, args []string, out io.Writer) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: antiddos unblock IP")
+	}
+	ip, err := netip.ParseAddr(args[0])
+	if err != nil {
+		return fmt.Errorf("invalid IP address %q: %w", args[0], err)
+	}
+	result, err := control.RequestUnblock(ctx, control.DefaultSocketPath, ip)
+	if err != nil {
+		return err
+	}
+	if result.Status == action.StatusFailed {
+		return result.Err
+	}
+	_, err = fmt.Fprintf(out, "%s: %s\n", result.IP, result.Status)
+	return err
 }
 
 func run(ctx context.Context, args []string, logger *slog.Logger) error {

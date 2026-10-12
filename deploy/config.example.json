@@ -4,6 +4,7 @@
   "start_position": "end",
   "block_mode": "dry_run",
   "block_duration": "5m",
+  "block_tcp_ports": [80, 443],
   "engine": {
     "ignore_ips": [],
     "rules": [

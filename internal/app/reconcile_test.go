@@ -2,14 +2,13 @@ package app
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"net/netip"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/it-nsk/antiddos/internal/action"
+	"github.com/it-nsk/antiddos/internal/blockmanager"
 	"github.com/it-nsk/antiddos/internal/blockpolicy"
 	"github.com/it-nsk/antiddos/internal/engine"
 	"github.com/it-nsk/antiddos/internal/request"
@@ -57,10 +56,15 @@ func TestReconcileRestoresRemainingLeaseAndRemovesWhitelistedIPs(t *testing.T) {
 		t.Fatal(err)
 	}
 	blockAction := &recordingAction{applyStatus: action.StatusApplied, removeStatus: action.StatusRemoved}
-	active := make(map[netip.Addr]blockpolicy.ActiveBlock)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	if err := reconcileStoredBlocks(context.Background(), store, ruleEngine, blockAction, active, logger); err != nil {
+	policy, err := blockpolicy.New(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := blockmanager.New(policy, time.Minute, blockAction, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Restore(context.Background(), func(ip netip.Addr) bool { return ruleEngine.IsIgnored(request.Event{IP: ip}) }, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(blockAction.removedIPs) != 2 {
@@ -72,6 +76,7 @@ func TestReconcileRestoresRemainingLeaseAndRemovesWhitelistedIPs(t *testing.T) {
 	if !blockAction.applyRequests[0].ExpiresAt.Equal(expiresAt) {
 		t.Fatalf("restored expiry = %s, want original %s", blockAction.applyRequests[0].ExpiresAt, expiresAt)
 	}
+	active := manager.Active()
 	if len(active) != 1 || !active[netip.MustParseAddr("203.0.113.7")].ExpiresAt.Equal(expiresAt) {
 		t.Fatalf("active policy leases = %+v", active)
 	}
