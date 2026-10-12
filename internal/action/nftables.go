@@ -17,15 +17,17 @@ const (
 	NftIPv6Set      = "blocked_ipv6"
 	NftSetMaxSize   = 65535
 	nftTableComment = "managed by antiddos"
+	nftRuleComment  = "antiddos-managed"
 )
 
 // NFTables manages the AntiDDoS-owned table, sets, chains, and block elements.
 // It never modifies other tables or invokes a shell.
 type NFTables struct {
 	// Binary may override the nft executable path. Empty uses "nft" from PATH.
-	Binary string
-	run    func(context.Context, string, ...string) ([]byte, error)
-	now    func() time.Time
+	Binary        string
+	BlockTCPPorts []uint16
+	run           func(context.Context, string, ...string) ([]byte, error)
+	now           func() time.Time
 }
 
 func (nftAction *NFTables) Apply(ctx context.Context, request BlockRequest) Result {
@@ -212,18 +214,108 @@ func (nftAction *NFTables) ensureChain(command func(...string) ([]byte, error), 
 }
 
 func (nftAction *NFTables) ensureRule(command func(...string) ([]byte, error), chain, family, set string) error {
-	output, err := command("list", "chain", NftFamily, NftTable, chain)
+	output, err := command("-a", "list", "chain", NftFamily, NftTable, chain)
 	if err != nil {
 		return fmt.Errorf("inspect nftables chain %s: %w: %s", chain, err, strings.TrimSpace(string(output)))
 	}
-	if strings.Contains(string(output), family+" saddr @"+set+" drop") {
-		return nil
+	lines := strings.Split(string(output), "\n")
+	ports := formatPorts(nftAction.BlockTCPPorts)
+	marker := nftRuleMarker(chain, family, ports)
+	hasDesired := false
+	for _, line := range lines {
+		body, _, ok := nftRuleLine(line)
+		if !ok {
+			continue
+		}
+		if strings.Contains(body, `comment "`+marker+`"`) || (ports == "" && body == nftRuleExpression(family, set, "", "")) {
+			hasDesired = true
+		}
 	}
-	output, err = command("add", "rule", NftFamily, NftTable, chain, family, "saddr", "@"+set, "drop")
-	if err != nil {
-		return fmt.Errorf("add nftables block rule to %s: %w: %s", chain, err, strings.TrimSpace(string(output)))
+	if !hasDesired {
+		args := []string{"add", "rule", NftFamily, NftTable, chain}
+		if ports != "" {
+			args = append(args, "tcp", "dport", "{")
+			for index, port := range nftAction.BlockTCPPorts {
+				value := strconv.Itoa(int(port))
+				if index != len(nftAction.BlockTCPPorts)-1 {
+					value += ","
+				}
+				args = append(args, value)
+			}
+			args = append(args, "}")
+		}
+		args = append(args, family, "saddr", "@"+set, "drop", "comment", `"`+marker+`"`)
+		output, err = command(args...)
+		if err != nil {
+			return fmt.Errorf("add nftables block rule to %s: %w: %s", chain, err, strings.TrimSpace(string(output)))
+		}
+	}
+
+	// Rules from older AntiDDoS versions had no comment and blocked all traffic.
+	// Remove those when a port restriction is configured, and replace stale
+	// commented AntiDDoS rules after a configuration change.
+	for _, line := range lines {
+		body, handle, ok := nftRuleLine(line)
+		if !ok {
+			continue
+		}
+		managedPrefix := `comment "` + nftRuleComment + ":" + chain + ":" + family + ":"
+		managedForTarget := strings.Contains(body, managedPrefix)
+		legacyBroad := ports != "" && body == nftRuleExpression(family, set, "", "")
+		if (managedForTarget && !strings.Contains(body, `comment "`+marker+`"`)) || legacyBroad {
+			output, err = command("delete", "rule", NftFamily, NftTable, chain, "handle", strconv.Itoa(handle))
+			if err != nil {
+				return fmt.Errorf("remove obsolete AntiDDoS rule from %s: %w: %s", chain, err, strings.TrimSpace(string(output)))
+			}
+		}
 	}
 	return nil
+}
+
+func formatPorts(ports []uint16) string {
+	values := make([]string, len(ports))
+	for index, port := range ports {
+		values[index] = strconv.Itoa(int(port))
+	}
+	return strings.Join(values, ",")
+}
+
+func nftRuleMarker(chain, family, ports string) string {
+	scope := "all"
+	if ports != "" {
+		scope = "tcp:" + ports
+	}
+	return nftRuleComment + ":" + chain + ":" + family + ":" + scope
+}
+
+func nftRuleExpression(family, set, ports, marker string) string {
+	expression := ""
+	if ports != "" {
+		formatted := strings.ReplaceAll(ports, ",", ", ")
+		if strings.Contains(formatted, ",") {
+			expression = "tcp dport { " + formatted + " } "
+		} else {
+			expression = "tcp dport " + formatted + " "
+		}
+	}
+	expression += family + " saddr @" + set + " drop"
+	if marker != "" {
+		expression += ` comment "` + marker + `"`
+	}
+	return expression
+}
+
+func nftRuleLine(line string) (body string, handle int, ok bool) {
+	const handleMarker = "# handle "
+	index := strings.LastIndex(line, handleMarker)
+	if index < 0 {
+		return "", 0, false
+	}
+	handle, err := strconv.Atoi(strings.TrimSpace(line[index+len(handleMarker):]))
+	if err != nil {
+		return "", 0, false
+	}
+	return strings.TrimSpace(line[:index]), handle, true
 }
 
 func isMissingNFTObject(output []byte) bool {

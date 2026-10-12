@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -158,9 +159,15 @@ func TestNFTablesRemoveTreatsMissingElementAsAlreadyAbsent(t *testing.T) {
 
 func TestNFTablesInitializeCreatesOnlyOwnedObjectsAndIsIdempotent(t *testing.T) {
 	objects := make(map[string]string)
+	rules := make(map[string][]string)
 	var calls [][]string
+	nextHandle := 1
 	runner := func(_ context.Context, _ string, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), args...))
+		if len(args) >= 6 && args[0] == "-a" && args[1] == "list" && args[2] == "chain" {
+			chain := args[5]
+			return []byte("chain " + chain + " {\n" + strings.Join(rules[chain], "\n") + "\n}\n"), nil
+		}
 		key := strings.Join(args[1:], " ")
 		switch args[0] {
 		case "list":
@@ -169,26 +176,30 @@ func TestNFTablesInitializeCreatesOnlyOwnedObjectsAndIsIdempotent(t *testing.T) 
 			}
 			return []byte("Error: No such file or directory"), errors.New("exit status 1")
 		case "add":
+			if len(args) > 1 && args[1] == "rule" {
+				chain := args[4]
+				rules[chain] = append(rules[chain], strings.Join(args[5:], " ")+" # handle "+strconv.Itoa(nextHandle))
+				nextHandle++
+				return nil, nil
+			}
 			objects[key] = strings.Join(args, " ")
-			if strings.Contains(key, "table inet antiddos") {
+			if len(args) > 1 && args[1] == "table" {
 				objects["table inet antiddos"] = `table inet antiddos { comment "managed by antiddos" }`
 			}
-			if strings.Contains(key, "set inet antiddos blocked_ipv4") {
+			if len(args) > 1 && args[1] == "set" && args[4] == NftIPv4Set {
 				objects["set inet antiddos blocked_ipv4"] = "set blocked_ipv4 { type ipv4_addr; flags timeout; size 65535; }"
 			}
-			if strings.Contains(key, "set inet antiddos blocked_ipv6") {
+			if len(args) > 1 && args[1] == "set" && args[4] == NftIPv6Set {
 				objects["set inet antiddos blocked_ipv6"] = "set blocked_ipv6 { type ipv6_addr; flags timeout; size 65535; }"
 			}
-			if strings.Contains(key, "chain inet antiddos input") {
+			if len(args) > 1 && args[1] == "chain" && args[4] == "input" {
 				objects["chain inet antiddos input"] = "chain input { type filter hook input priority -10; policy accept; }"
 			}
-			if strings.Contains(key, "chain inet antiddos forward") {
+			if len(args) > 1 && args[1] == "chain" && args[4] == "forward" {
 				objects["chain inet antiddos forward"] = "chain forward { type filter hook forward priority -10; policy accept; }"
 			}
-			if args[0] == "add" && len(args) > 5 && args[1] == "rule" {
-				chainKey := "chain inet antiddos " + args[4]
-				objects[chainKey] += "\n" + strings.Join(args[5:], " ")
-			}
+			return nil, nil
+		case "delete":
 			return nil, nil
 		default:
 			return nil, fmt.Errorf("unexpected command: %q", args)
@@ -206,9 +217,39 @@ func TestNFTablesInitializeCreatesOnlyOwnedObjectsAndIsIdempotent(t *testing.T) 
 		t.Fatal("expected startup inspection commands on both initializations")
 	}
 	for _, args := range calls {
-		if args[0] == "flush" || args[0] == "delete" || args[0] == "replace" {
+		if args[0] == "flush" || args[0] == "replace" || (args[0] == "delete" && len(args) > 1 && args[1] != "rule") {
 			t.Fatalf("initializer must not destroy or replace firewall state: %q", args)
 		}
+	}
+}
+
+func TestNFTablesPortRestrictionRemovesLegacyAllPortRule(t *testing.T) {
+	var calls [][]string
+	nftAction := NFTables{BlockTCPPorts: []uint16{80, 443}, run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if len(args) >= 6 && args[0] == "-a" {
+			return []byte("chain input {\n ip saddr @blocked_ipv4 drop # handle 7\n tcp dport 8080 ip saddr @blocked_ipv4 drop comment \"antiddos-managed:input:ip:tcp:8080\" # handle 8\n}\n"), nil
+		}
+		return nil, nil
+	}}
+	if err := nftAction.ensureRule(func(args ...string) ([]byte, error) { return nftAction.run(context.Background(), "nft", args...) }, "input", "ip", NftIPv4Set); err != nil {
+		t.Fatal(err)
+	}
+	var added, removedLegacy, removedStale bool
+	for _, args := range calls {
+		joined := strings.Join(args, " ")
+		if strings.HasPrefix(joined, "add rule ") {
+			added = strings.Contains(joined, "tcp dport { 80, 443 }") && strings.Contains(joined, "ip saddr @blocked_ipv4 drop")
+		}
+		switch strings.Join(args, " ") {
+		case "delete rule inet antiddos input handle 7":
+			removedLegacy = true
+		case "delete rule inet antiddos input handle 8":
+			removedStale = true
+		}
+	}
+	if !added || !removedLegacy || !removedStale {
+		t.Fatalf("commands = %#v; expected TCP 80/443 rule and removal of old broad/stale rules", calls)
 	}
 }
 

@@ -3,7 +3,6 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -11,8 +10,10 @@ import (
 	"time"
 
 	"github.com/it-nsk/antiddos/internal/action"
+	"github.com/it-nsk/antiddos/internal/blockmanager"
 	"github.com/it-nsk/antiddos/internal/blockpolicy"
 	"github.com/it-nsk/antiddos/internal/config"
+	"github.com/it-nsk/antiddos/internal/control"
 	"github.com/it-nsk/antiddos/internal/engine"
 	"github.com/it-nsk/antiddos/internal/metrics"
 	"github.com/it-nsk/antiddos/internal/parser"
@@ -26,6 +27,7 @@ const lineBufferSize = 256
 // RunOptions contains command-line choices parsed by cmd/antiddos.
 type RunOptions struct {
 	Config, LogFile                    string
+	ControlSocketPath                  string
 	FromStart, PrintLines, PrintEvents bool
 }
 
@@ -62,29 +64,51 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 	}
 	var blockAction action.Action = action.DryRun{}
 	if cfg.BlockMode == config.BlockModeNFTables {
-		blockAction = &action.NFTables{}
+		blockAction = &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}
 	}
-	activeBlocks := make(map[netip.Addr]blockpolicy.ActiveBlock)
 	analysisConfigID := engine.AnalysisConfigID(ruleEngine.RuleRevisions())
 	database, err := storage.Open(cfg.DatabasePath)
 	if err != nil {
 		return fmt.Errorf("initialize SQLite storage: %w", err)
-	}
-	if err := database.PruneExpiredBlocks(context.Background(), time.Now()); err != nil {
-		database.Close()
-		return err
-	}
-	if cfg.BlockMode == config.BlockModeNFTables {
-		if err := reconcileStoredBlocks(ctx, database, ruleEngine, blockAction, activeBlocks, logger); err != nil {
-			database.Close()
-			return err
-		}
 	}
 	defer func() {
 		if err := database.Close(); err != nil {
 			logger.Error("close SQLite storage", "error", err)
 		}
 	}()
+	manager, err := blockmanager.New(blockPolicy, cfg.BlockDuration, blockAction, database)
+	if err != nil {
+		return err
+	}
+	if err := manager.Cleanup(ctx, time.Now()); err != nil {
+		return fmt.Errorf("prune expired block records: %w", err)
+	}
+	if cfg.BlockMode == config.BlockModeNFTables {
+		if err := manager.Restore(ctx, func(ip netip.Addr) bool { return ruleEngine.IsIgnored(request.Event{IP: ip}) }, func(result action.Result) {
+			logBlockResult(logger, result, false)
+		}); err != nil {
+			return err
+		}
+	}
+	var controlErrors <-chan error
+	controlCtx, cancelControl := context.WithCancel(ctx)
+	var controlStopped <-chan struct{}
+	defer func() {
+		cancelControl()
+		if controlStopped != nil {
+			<-controlStopped
+		}
+	}()
+	if cfg.BlockMode == config.BlockModeNFTables && opts.ControlSocketPath != "" {
+		ch := make(chan error, 1)
+		stopped := make(chan struct{})
+		controlErrors = ch
+		controlStopped = stopped
+		go func() {
+			defer close(stopped)
+			ch <- control.Serve(controlCtx, opts.ControlSocketPath, manager)
+		}()
+	}
 	follower, err := reader.Open(reader.Options{
 		Path:          cfg.LogFile,
 		StartPosition: reader.StartPosition(cfg.StartPosition),
@@ -110,6 +134,7 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 		"start_position", cfg.StartPosition,
 		"block_mode", cfg.BlockMode,
 		"block_duration", cfg.BlockDuration,
+		"block_tcp_ports", cfg.BlockTCPPorts,
 		"rules", len(rules),
 		"analysis_config_id", analysisConfigID,
 	)
@@ -117,6 +142,13 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 	metricCollector := metrics.NewCollector()
 	metricsTicker := time.NewTicker(metrics.SampleInterval)
 	defer metricsTicker.Stop()
+	blockCleanupCtx, cancelBlockCleanup := context.WithCancel(ctx)
+	blockCleanupDone := make(chan struct{})
+	go func() {
+		defer close(blockCleanupDone)
+		manager.RunCleanup(blockCleanupCtx, time.Minute, func(err error) { logger.Error("prune expired block records", "error", err) })
+	}()
+	defer func() { cancelBlockCleanup(); <-blockCleanupDone }()
 	var expiryTicker *time.Ticker
 	var expiryTick <-chan time.Time
 	if liveTail {
@@ -124,8 +156,6 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 		expiryTick = expiryTicker.C
 		defer expiryTicker.Stop()
 	}
-	blockCleanupTicker := time.NewTicker(time.Minute)
-	defer blockCleanupTicker.Stop()
 	defer func() {
 		logger.Info(
 			"service stopped",
@@ -184,42 +214,11 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 			statistics.emittedDetections++
 			statistics.thresholdDetections++
 			logDetection(logger, analysisConfigID, *evaluation.Detection)
-			now := time.Now()
-			var active *blockpolicy.ActiveBlock
-			if evaluation.Detection.GroupField == engine.GroupByIP {
-				if ip, parseErr := netip.ParseAddr(evaluation.Detection.GroupValue); parseErr == nil {
-					ip = ip.Unmap()
-					if current, ok := activeBlocks[ip]; ok {
-						active = &current
-					}
-				}
-			}
-			decision, err := blockPolicy.Evaluate(*evaluation.Detection, now, active)
-			if err != nil {
-				logger.Error("evaluate block policy", "rule", evaluation.Detection.RuleID, "error", err)
-				continue
-			}
-			if decision.Outcome == blockpolicy.OutcomeSkip {
-				logBlockResult(logger, action.Result{Status: action.StatusSkipped, Reason: string(decision.Reason)}, cfg.BlockMode == config.BlockModeDryRun)
-				continue
-			}
-			if decision.Outcome == blockpolicy.OutcomeKeepExistingBlock {
-				logBlockResult(logger, action.Result{Status: action.StatusAlreadyActive, IP: decision.IP, ExpiresAt: decision.ExpiresAt, Reason: string(decision.Reason)}, cfg.BlockMode == config.BlockModeDryRun)
-				continue
-			}
-			result := blockAction.Apply(ctx, action.BlockRequest{
-				IP: decision.IP, ExpiresAt: decision.ExpiresAt, RuleID: decision.RuleID,
-			})
-			if result.Status == action.StatusWouldApply || result.Status == action.StatusApplied {
-				activeBlocks[decision.IP] = blockpolicy.ActiveBlock{IP: decision.IP, ExpiresAt: decision.ExpiresAt}
-			}
-			if result.Status == action.StatusApplied {
-				startedAt := decision.ExpiresAt.Add(-cfg.BlockDuration)
-				if err := database.RecordBlock(context.Background(), decision.IP, decision.RuleID, startedAt, decision.ExpiresAt); err != nil {
-					logger.Error("persist active block", "ip", decision.IP, "error", err)
-				}
-			}
+			result, err := manager.Process(ctx, *evaluation.Detection, time.Now())
 			logBlockResult(logger, result, cfg.BlockMode == config.BlockModeDryRun)
+			if err != nil {
+				logger.Error("persist active block", "ip", result.IP, "error", err)
+			}
 		}
 		if violating {
 			statistics.violatingRequests++
@@ -268,14 +267,11 @@ readLoop:
 			}
 		case now := <-expiryTick:
 			ruleEngine.AdvanceWallClock(now)
-		case now := <-blockCleanupTicker.C:
-			for ip, block := range activeBlocks {
-				if !block.ExpiresAt.After(now) {
-					delete(activeBlocks, ip)
-				}
-			}
-			if err := database.PruneExpiredBlocks(context.Background(), now); err != nil {
-				logger.Error("prune expired block records", "error", err)
+		case serverErr := <-controlErrors:
+			controlErrors = nil
+			if serverErr != nil {
+				processingError = fmt.Errorf("control socket: %w", serverErr)
+				break readLoop
 			}
 		}
 	}
@@ -306,56 +302,6 @@ readLoop:
 	}
 	if statistics.lateEvents > 0 {
 		logger.Warn("analysis excluded late requests", "late_events", statistics.lateEvents, "late_matching_requests", statistics.lateMatchingRequests)
-	}
-	return nil
-}
-
-func reconcileStoredBlocks(
-	ctx context.Context,
-	database *storage.Store,
-	ruleEngine *engine.Engine,
-	blockAction action.Action,
-	activeBlocks map[netip.Addr]blockpolicy.ActiveBlock,
-	logger *slog.Logger,
-) error {
-	now := time.Now()
-	leases, err := database.UnexpiredBlocks(ctx, now)
-	if err != nil {
-		return fmt.Errorf("load unexpired block records: %w", err)
-	}
-	var reconciliationErrors []error
-	for _, lease := range leases {
-		if ruleEngine.IsIgnored(request.Event{IP: lease.IP}) {
-			result := blockAction.Remove(ctx, lease.IP)
-			logBlockResult(logger, result, false)
-			if result.Status != action.StatusRemoved && result.Status != action.StatusAlreadyAbsent {
-				reconciliationErrors = append(reconciliationErrors, fmt.Errorf("remove whitelisted IP %s (status %s): %v", lease.IP, result.Status, result.Err))
-				continue
-			}
-			if err := database.DeleteBlock(ctx, lease.IP); err != nil {
-				reconciliationErrors = append(reconciliationErrors, err)
-			}
-			continue
-		}
-		if !lease.ExpiresAt.After(now.Add(time.Second)) {
-			if err := database.DeleteBlock(ctx, lease.IP); err != nil {
-				reconciliationErrors = append(reconciliationErrors, err)
-			}
-			continue
-		}
-
-		result := blockAction.Apply(ctx, action.BlockRequest{
-			IP: lease.IP, ExpiresAt: lease.ExpiresAt, RuleID: lease.RuleID,
-		})
-		logBlockResult(logger, result, false)
-		if result.Status != action.StatusApplied && result.Status != action.StatusAlreadyActive {
-			reconciliationErrors = append(reconciliationErrors, fmt.Errorf("restore block for %s (status %s): %v", lease.IP, result.Status, result.Err))
-			continue
-		}
-		activeBlocks[lease.IP] = blockpolicy.ActiveBlock{IP: lease.IP, ExpiresAt: lease.ExpiresAt}
-	}
-	if len(reconciliationErrors) > 0 {
-		return fmt.Errorf("reconcile stored blocks: %w", errors.Join(reconciliationErrors...))
 	}
 	return nil
 }

@@ -77,6 +77,7 @@ Minimal example:
   "start_position": "end",
   "block_mode": "dry_run",
   "block_duration": "5m",
+  "block_tcp_ports": [80, 443],
   "engine": {
     "ignore_ips": [],
     "rules": [{
@@ -111,10 +112,20 @@ The daemon creates only its own `inet antiddos` table, timeout sets capped at
 rewrite other nftables tables. A conflicting table or incompatible set/chain
 makes startup fail with an error; reaching the set limit makes new block actions
 fail visibly instead of growing firewall memory without a bound.
-The rules drop matching addresses before they reach a local service or a
-forwarded/container destination. Use the actual client IP visible to Nginx and
-the host firewall when validating enforcement; requests through a proxy or
-container network can have a different source address.
+Set `block_tcp_ports` to restrict blocking to TCP destination ports, for example
+`[80, 443]` for HTTP and HTTPS. If the list is empty or omitted, rules drop a
+matching address on every protocol and port. The setting applies to both
+`input` and `forward`: for Docker traffic, the forward rule sees the destination
+port after destination NAT, so use the
+container-side port when it differs from the published host port. Changing the
+list replaces AntiDDoS-managed rules and removes the legacy all-port rules it
+created; other nftables tables are untouched.
+
+These are server firewall rules, not per-site Nginx rules. Use the actual client
+IP visible to Nginx and the host firewall when validating enforcement. Behind a
+reverse proxy, configure Nginx to trust forwarded client-IP headers only from
+the proxy's address; otherwise Nginx may log the proxy IP and AntiDDoS will
+block that shared proxy address.
 
 The log path can instead be overridden in `/etc/default/antiddos`:
 
@@ -135,6 +146,18 @@ Watch traffic, detections, and active blocks in the terminal:
 sudo -u antiddos /usr/local/bin/antiddos monitor
 sudo -u antiddos /usr/local/bin/antiddos monitor --limit 100
 ```
+
+Remove one IP from the active firewall blocks without restarting the daemon:
+
+```shell
+sudo -u antiddos /usr/local/bin/antiddos unblock 203.0.113.10
+```
+
+`unblock` accepts one IPv4 or IPv6 address. The CLI sends the request through
+`/run/antiddos/control.sock`; only the running daemon has `CAP_NET_ADMIN` and
+performs the nftables change. The socket is available to the `antiddos` service
+account; using `sudo -u antiddos` does not grant firewall capabilities to the
+CLI process.
 
 `monitor` refreshes every two seconds. By default it shows the latest 20 traffic
 intervals, 20 detections, and active block records. Pass `--limit N` to change

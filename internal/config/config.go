@@ -36,6 +36,7 @@ type Config struct {
 	StartPosition string
 	BlockMode     string
 	BlockDuration time.Duration
+	BlockTCPPorts []uint16
 	Engine        EngineConfig
 }
 
@@ -58,6 +59,7 @@ type rawConfig struct {
 	StartPosition string          `json:"start_position"`
 	BlockMode     string          `json:"block_mode"`
 	BlockDuration string          `json:"block_duration"`
+	BlockTCPPorts []int           `json:"block_tcp_ports"`
 	Engine        json.RawMessage `json:"engine"`
 }
 
@@ -138,9 +140,22 @@ func decode(input io.Reader, path, logFile string) (Config, error) {
 			return Config{}, fmt.Errorf("config %q: block_duration: %w", path, err)
 		}
 	}
+	blockTCPPorts := make([]uint16, 0, len(raw.BlockTCPPorts))
+	seenPorts := make(map[int]struct{}, len(raw.BlockTCPPorts))
+	for index, port := range raw.BlockTCPPorts {
+		if port < 1 || port > 65535 {
+			return Config{}, fmt.Errorf("config %q: block_tcp_ports[%d] must be between 1 and 65535", path, index)
+		}
+		if _, exists := seenPorts[port]; exists {
+			return Config{}, fmt.Errorf("config %q: block_tcp_ports contains duplicate port %d", path, port)
+		}
+		seenPorts[port] = struct{}{}
+		blockTCPPorts = append(blockTCPPorts, uint16(port))
+	}
 	return Config{
 		LogFile: filepath.Clean(raw.LogFile), DatabasePath: filepath.Clean(raw.DatabasePath),
-		StartPosition: raw.StartPosition, BlockMode: blockMode, BlockDuration: blockDuration, Engine: engineConfig,
+		StartPosition: raw.StartPosition, BlockMode: blockMode, BlockDuration: blockDuration,
+		BlockTCPPorts: blockTCPPorts, Engine: engineConfig,
 	}, nil
 }
 

@@ -29,6 +29,8 @@ RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
 StateDirectory=antiddos
 StateDirectoryMode=0700
+RuntimeDirectory=antiddos
+RuntimeDirectoryMode=0750
 
 [Install]
 WantedBy=multi-user.target
