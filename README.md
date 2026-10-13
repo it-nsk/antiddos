@@ -165,6 +165,8 @@ the row limits, for example `--limit 100`; valid values are 1–1000. The refres
 interval stays two seconds regardless of the limit. Use `Ctrl+C` to leave
 monitoring; the service keeps running. Use `monitor --once` for one snapshot. It
 opens SQLite read-only and does not require the external `sqlite3` command.
+When using the system configuration, monitor also reads `ANTIDDOS_LOG_FILE`
+from `/etc/default/antiddos`, so its displayed log path matches the daemon.
 
 The binary uses `ANTIDDOS_CONFIG` and `ANTIDDOS_LOG_FILE`. The supplied systemd
 unit sets `ANTIDDOS_CONFIG` to `/etc/antiddos/config.json` and reads the optional

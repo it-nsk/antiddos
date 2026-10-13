@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -258,11 +259,53 @@ func printBlocks(out io.Writer, rows []storage.BlockRow, now time.Time) error {
 }
 
 func monitorConfig(o monitorOptions) (config.Config, error) {
-	cfg, err := config.Load(o.Config)
+	logFile, err := monitorLogFileOverride(o.Config, os.Getenv("ANTIDDOS_LOG_FILE"), "/etc/default/antiddos")
+	if err != nil {
+		return config.Config{}, err
+	}
+	cfg, err := config.LoadWithLogFile(o.Config, logFile)
 	if err != nil {
 		return config.Config{}, err
 	}
 	return cfg, nil
+}
+
+func monitorLogFileOverride(configFile, environmentValue, environmentFile string) (string, error) {
+	if environmentValue != "" {
+		return environmentValue, nil
+	}
+	if filepath.Clean(configFile) != config.DefaultPath {
+		return "", nil
+	}
+
+	contents, err := os.ReadFile(environmentFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read service environment file %q: %w", environmentFile, err)
+	}
+	return parseLogFileOverride(string(contents)), nil
+}
+
+func parseLogFileOverride(contents string) string {
+	var value string
+	for _, line := range strings.Split(contents, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, item, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) != "ANTIDDOS_LOG_FILE" {
+			continue
+		}
+		item = strings.TrimSpace(item)
+		if len(item) >= 2 && ((item[0] == '"' && item[len(item)-1] == '"') || (item[0] == '\'' && item[len(item)-1] == '\'')) {
+			item = item[1 : len(item)-1]
+		}
+		value = item
+	}
+	return value
 }
 
 func configPath() string {
