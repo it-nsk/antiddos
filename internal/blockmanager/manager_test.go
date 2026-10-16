@@ -118,7 +118,9 @@ func TestRestoreUsesOriginalExpiryAndRemovesWhitelistedLease(t *testing.T) {
 	if err := store.RecordBlock(context.Background(), whitelisted, "homepage", now.Add(-time.Minute), now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.Restore(context.Background(), func(ip netip.Addr) bool { return ip == whitelisted }, nil); err != nil {
+	if err := manager.Restore(context.Background(), func(ip netip.Addr, ruleID string) bool {
+		return ip == whitelisted && ruleID == "homepage"
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(blockAction.apply) != 1 || !blockAction.apply[0].ExpiresAt.Equal(now.Add(30*time.Second)) {

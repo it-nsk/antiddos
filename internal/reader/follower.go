@@ -28,10 +28,17 @@ const (
 )
 
 type Options struct {
+	Source            string
 	Path              string
 	StartPosition     StartPosition
 	ReconcileInterval time.Duration
 	RotationGrace     time.Duration
+}
+
+// Line ties a raw log record to the configured source that produced it.
+type Line struct {
+	Source string
+	Text   string
 }
 
 type logStream struct {
@@ -49,6 +56,7 @@ type drainingStream struct {
 // rotation. All mutable stream state is accessed by the Run goroutine.
 // It is not safe to call Run more than once.
 type Follower struct {
+	source            string
 	path              string
 	reconcileInterval time.Duration
 	rotationGrace     time.Duration
@@ -81,6 +89,7 @@ func Open(options Options, logger *slog.Logger) (*Follower, error) {
 	}
 
 	follower := &Follower{
+		source:            options.Source,
 		path:              filepath.Clean(options.Path),
 		reconcileInterval: options.ReconcileInterval,
 		rotationGrace:     options.RotationGrace,
@@ -106,7 +115,7 @@ func Open(options Options, logger *slog.Logger) (*Follower, error) {
 	return follower, nil
 }
 
-func (f *Follower) Run(ctx context.Context, lines chan<- string) error {
+func (f *Follower) Run(ctx context.Context, lines chan<- Line) error {
 	defer f.close()
 
 	if err := f.readAvailable(ctx, lines, f.active); err != nil {
@@ -152,7 +161,7 @@ func (f *Follower) Run(ctx context.Context, lines chan<- string) error {
 	}
 }
 
-func (f *Follower) reconcile(ctx context.Context, lines chan<- string) error {
+func (f *Follower) reconcile(ctx context.Context, lines chan<- Line) error {
 	if err := f.drainRotated(ctx, lines); err != nil {
 		return err
 	}
@@ -229,11 +238,11 @@ func (f *Follower) openCurrent(seekEnd bool) error {
 		file:   file,
 		offset: offset,
 	}
-	f.logger.Info("log file opened", "path", f.path, "offset", offset)
+	f.logger.Info("log file opened", "source", f.source, "path", f.path, "offset", offset)
 	return nil
 }
 
-func (f *Follower) readAvailable(ctx context.Context, lines chan<- string, stream *logStream) error {
+func (f *Follower) readAvailable(ctx context.Context, lines chan<- Line, stream *logStream) error {
 	if stream == nil {
 		return nil
 	}
@@ -264,7 +273,7 @@ func (f *Follower) readAvailable(ctx context.Context, lines chan<- string, strea
 	}
 }
 
-func (f *Follower) emitCompleteLines(ctx context.Context, lines chan<- string, stream *logStream) error {
+func (f *Follower) emitCompleteLines(ctx context.Context, lines chan<- Line, stream *logStream) error {
 	for {
 		newline := bytes.IndexByte(stream.pending, '\n')
 		if newline < 0 {
@@ -277,7 +286,7 @@ func (f *Follower) emitCompleteLines(ctx context.Context, lines chan<- string, s
 		}
 
 		select {
-		case lines <- string(line):
+		case lines <- Line{Source: f.source, Text: string(line)}:
 			stream.pending = stream.pending[newline+1:]
 		case <-ctx.Done():
 			return ctx.Err()
@@ -293,13 +302,14 @@ func (f *Follower) beginRotationDrain(old *logStream) {
 	})
 	f.logger.Info(
 		"log file rotated; draining old inode",
+		"source", f.source,
 		"path", f.path,
 		"offset", old.offset,
 		"grace", f.rotationGrace,
 	)
 }
 
-func (f *Follower) drainRotated(ctx context.Context, lines chan<- string) error {
+func (f *Follower) drainRotated(ctx context.Context, lines chan<- Line) error {
 	remaining := f.draining[:0]
 	for index, draining := range f.draining {
 		previousOffset := draining.stream.offset
@@ -329,6 +339,9 @@ func (f *Follower) drainRotated(ctx context.Context, lines chan<- string) error 
 	f.draining = remaining
 	return nil
 }
+
+// Close releases resources when a follower was opened but never started.
+func (f *Follower) Close() { f.close() }
 
 func (f *Follower) dropPending(stream *logStream, reason string) {
 	if len(stream.pending) > 0 {

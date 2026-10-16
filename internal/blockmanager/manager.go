@@ -43,7 +43,7 @@ func New(policy *blockpolicy.Policy, duration time.Duration, blockAction action.
 
 // Restore prunes expired leases, removes newly-whitelisted addresses from the
 // firewall, and re-applies remaining leases using their original expiry.
-func (manager *Manager) Restore(ctx context.Context, isWhitelisted func(netip.Addr) bool, report func(action.Result)) error {
+func (manager *Manager) Restore(ctx context.Context, isWhitelisted func(netip.Addr, string) bool, report func(action.Result)) error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	now := time.Now()
@@ -57,7 +57,7 @@ func (manager *Manager) Restore(ctx context.Context, isWhitelisted func(netip.Ad
 	var failures []error
 	for _, lease := range leases {
 		ip := lease.IP.Unmap()
-		if isWhitelisted != nil && isWhitelisted(ip) {
+		if isWhitelisted != nil && isWhitelisted(ip, lease.RuleID) {
 			result := manager.action.Remove(ctx, ip)
 			if report != nil {
 				report(result)

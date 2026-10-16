@@ -216,7 +216,15 @@ func monitor(ctx context.Context, args []string, out io.Writer) error {
 		if !o.Once {
 			clearTerminal(out)
 		}
-		fmt.Fprintf(out, "Log: %s\nDatabase: %s\nUpdated: %s\n\nTRAFFIC (latest %d intervals)\n", cfg.LogFile, path, now.Format(time.RFC3339), o.Limit)
+		if len(cfg.LogSources) == 1 {
+			fmt.Fprintf(out, "Log: %s\n", cfg.LogSources[0].Path)
+		} else {
+			fmt.Fprintln(out, "Logs:")
+			for _, source := range cfg.LogSources {
+				fmt.Fprintf(out, "  %s: %s\n", source.ID, source.Path)
+			}
+		}
+		fmt.Fprintf(out, "Database: %s\nUpdated: %s\n\nTRAFFIC (latest %d intervals)\n", path, now.Format(time.RFC3339), o.Limit)
 		if err := printTraffic(out, traffic); err != nil {
 			return err
 		}

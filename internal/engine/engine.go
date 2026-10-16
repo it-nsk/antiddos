@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -16,17 +17,19 @@ import (
 )
 
 const (
-	ruleSemanticsVersion = "get-path-regex-v1"
+	ruleSemanticsVersion = "get-path-regex-v2-source-rule-whitelist"
 	minimumMapShrinkSize = 4096
 	ipv4MappedPrefixBits = 96
 )
 
 type Rule struct {
 	ID        string
+	LogSource string
 	PathRegex string
 	Window    time.Duration
 	Threshold int
 	GroupBy   GroupField
+	IgnoreIPs []string
 }
 
 type Detection struct {
@@ -69,10 +72,12 @@ type Options struct {
 
 type compiledRule struct {
 	id        string
+	logSource string
 	revision  string
 	pathRegex *regexp.Regexp
 	window    time.Duration
 	threshold int
+	ignoreIPs []netip.Prefix
 	grouping  compiledGrouping
 }
 
@@ -92,32 +97,20 @@ func NewWithOptions(rules []Rule, options Options) (*Engine, error) {
 		return nil, fmt.Errorf("at least one rule is required")
 	}
 	result := &Engine{rules: make([]compiledRule, 0, len(rules)), liveClock: options.LiveClock}
-	for index, value := range options.IgnoreIPs {
-		value = strings.TrimSpace(value)
-		prefix, err := netip.ParsePrefix(value)
-		if err != nil {
-			if address, addressErr := netip.ParseAddr(value); addressErr == nil {
-				prefix = netip.PrefixFrom(address, address.BitLen())
-			} else {
-				return nil, fmt.Errorf("ignore_ips[%d]: invalid IP or CIDR %q", index, value)
-			}
-		}
-		prefix = prefix.Masked()
-		if prefix.Addr().Is4In6() {
-			if prefix.Bits() < ipv4MappedPrefixBits {
-				return nil, fmt.Errorf("ignore_ips[%d]: invalid IPv4-mapped prefix %q", index, value)
-			}
-			// The first 96 bits identify the IPv4-mapped IPv6 range; the
-			// remaining prefix bits are the original IPv4 network mask.
-			prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-ipv4MappedPrefixBits)
-		}
-		result.ignoreIPs = append(result.ignoreIPs, prefix)
+	globalIgnoreIPs, err := parsePrefixes(options.IgnoreIPs, "ignore_ips")
+	if err != nil {
+		return nil, err
 	}
+	result.ignoreIPs = globalIgnoreIPs
 	ruleIDs := make(map[string]struct{}, len(rules))
 	for index, rule := range rules {
 		compiled, err := compileRule(rule)
 		if err != nil {
 			return nil, fmt.Errorf("rule[%d]: %w", index, err)
+		}
+		compiled.ignoreIPs, err = parsePrefixes(rule.IgnoreIPs, fmt.Sprintf("rule[%q].ignore_ips", rule.ID))
+		if err != nil {
+			return nil, err
 		}
 		if _, exists := ruleIDs[compiled.id]; exists {
 			return nil, fmt.Errorf("rule[%d]: duplicate id %q", index, compiled.id)
@@ -126,6 +119,32 @@ func NewWithOptions(rules []Rule, options Options) (*Engine, error) {
 		result.rules = append(result.rules, compiled)
 	}
 	return result, nil
+}
+
+func parsePrefixes(values []string, field string) ([]netip.Prefix, error) {
+	prefixes := make([]netip.Prefix, 0, len(values))
+	for index, value := range values {
+		value = strings.TrimSpace(value)
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			if address, addressErr := netip.ParseAddr(value); addressErr == nil {
+				prefix = netip.PrefixFrom(address, address.BitLen())
+			} else {
+				return nil, fmt.Errorf("%s[%d]: invalid IP or CIDR %q", field, index, value)
+			}
+		}
+		prefix = prefix.Masked()
+		if prefix.Addr().Is4In6() {
+			if prefix.Bits() < ipv4MappedPrefixBits {
+				return nil, fmt.Errorf("%s[%d]: invalid IPv4-mapped prefix %q", field, index, value)
+			}
+			// The first 96 bits identify the IPv4-mapped IPv6 range; the
+			// remaining prefix bits are the original IPv4 network mask.
+			prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-ipv4MappedPrefixBits)
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
 }
 
 func compileRule(rule Rule) (compiledRule, error) {
@@ -151,7 +170,7 @@ func compileRule(rule Rule) (compiledRule, error) {
 		return compiledRule{}, err
 	}
 	return compiledRule{
-		id: rule.ID, revision: revision, pathRegex: pathRegex, window: rule.Window,
+		id: rule.ID, logSource: rule.LogSource, revision: revision, pathRegex: pathRegex, window: rule.Window,
 		threshold: rule.Threshold,
 		grouping:  compiledGrouping{field: rule.GroupBy, key: key, groups: make(map[GroupKey]*timestampWindow)},
 	}, nil
@@ -159,21 +178,34 @@ func compileRule(rule Rule) (compiledRule, error) {
 
 // Process and AdvanceWallClock must be called by the same owner goroutine.
 func (engine *Engine) Process(event request.Event) ([]Evaluation, error) {
+	evaluations, _, err := engine.ProcessWithMatch(event)
+	return evaluations, err
+}
+
+// ProcessWithMatch evaluates each rule once and reports whether any rule's
+// request selector matched. The match result includes rule-whitelisted events,
+// which remain visible to traffic statistics but do not enter that rule's window.
+func (engine *Engine) ProcessWithMatch(event request.Event) ([]Evaluation, bool, error) {
 	if engine.IsIgnored(event) {
-		return nil, nil
+		return nil, engine.Matches(event), nil
 	}
 	timestamp := event.Timestamp.UTC()
 	if engine.IsLate(timestamp) {
-		return nil, fmt.Errorf("event timestamp %s is before the accepted event-time watermark", timestamp.Format(time.RFC3339Nano))
+		return nil, engine.Matches(event), fmt.Errorf("event timestamp %s is before the accepted event-time watermark", timestamp.Format(time.RFC3339Nano))
 	}
 	engine.frontier = timestamp
 	engine.hasFrontier = true
 	engine.cleanup(timestamp)
 
 	evaluations := make([]Evaluation, 0, len(engine.rules))
+	matched := false
 	for ruleIndex := range engine.rules {
 		rule := &engine.rules[ruleIndex]
 		if !rule.matches(event) {
+			continue
+		}
+		matched = true
+		if rule.ignores(event.IP) {
 			continue
 		}
 		grouping := &rule.grouping
@@ -204,7 +236,7 @@ func (engine *Engine) Process(event request.Event) ([]Evaluation, error) {
 		}
 		evaluations = append(evaluations, evaluation)
 	}
-	return evaluations, nil
+	return evaluations, matched, nil
 }
 
 func (engine *Engine) IsIgnored(event request.Event) bool {
@@ -214,6 +246,35 @@ func (engine *Engine) IsIgnored(event request.Event) bool {
 	}
 	address = address.Unmap()
 	for _, prefix := range engine.ignoreIPs {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsIgnoredForRule reports whether an address is excluded globally or by the
+// whitelist of the named rule. It is also used when restoring stored leases.
+func (engine *Engine) IsIgnoredForRule(address netip.Addr, ruleID string) bool {
+	event := request.Event{IP: address}
+	if engine.IsIgnored(event) {
+		return true
+	}
+	for index := range engine.rules {
+		rule := &engine.rules[index]
+		if rule.id == ruleID {
+			return rule.ignores(address)
+		}
+	}
+	return false
+}
+
+func (rule *compiledRule) ignores(address netip.Addr) bool {
+	if !address.IsValid() {
+		return false
+	}
+	address = address.Unmap()
+	for _, prefix := range rule.ignoreIPs {
 		if prefix.Contains(address) {
 			return true
 		}
@@ -343,7 +404,7 @@ func AnalysisConfigID(ruleRevisions []string) string {
 	canonical := struct {
 		Version       string   `json:"version"`
 		RuleRevisions []string `json:"rule_revisions"`
-	}{Version: "analysis-v3-path-regex", RuleRevisions: append([]string(nil), ruleRevisions...)}
+	}{Version: "analysis-v4-multi-source-rule-whitelist", RuleRevisions: append([]string(nil), ruleRevisions...)}
 	encoded, _ := json.Marshal(canonical)
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:])
@@ -353,18 +414,26 @@ func ruleRevision(rule Rule) (string, error) {
 	canonical := struct {
 		Version   string     `json:"version"`
 		ID        string     `json:"id"`
+		LogSource string     `json:"log_source"`
+		IgnoreIPs []string   `json:"ignore_ips"`
 		PathRegex string     `json:"path_regex"`
 		WindowNS  int64      `json:"window_ns"`
 		Threshold int        `json:"threshold"`
 		GroupBy   GroupField `json:"group_by"`
 		Policy    string     `json:"notification_policy"`
-	}{ruleSemanticsVersion, rule.ID, rule.PathRegex, int64(rule.Window), rule.Threshold, rule.GroupBy, "every-threshold-violation"}
+	}{ruleSemanticsVersion, rule.ID, rule.LogSource, canonicalPrefixes(rule.IgnoreIPs), rule.PathRegex, int64(rule.Window), rule.Threshold, rule.GroupBy, "every-threshold-violation"}
 	encoded, err := json.Marshal(canonical)
 	if err != nil {
 		return "", fmt.Errorf("encode rule revision: %w", err)
 	}
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func canonicalPrefixes(values []string) []string {
+	result := append([]string(nil), values...)
+	sort.Strings(result)
+	return result
 }
 
 func validID(id string) error {

@@ -39,24 +39,39 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 	if opts.FromStart {
 		cfg.StartPosition = string(reader.StartAtBeginning)
 	}
-	rules := make([]engine.Rule, len(cfg.Engine.Rules))
-	for ruleIndex, configuredRule := range cfg.Engine.Rules {
-		rules[ruleIndex] = engine.Rule{
-			ID: configuredRule.ID, PathRegex: configuredRule.PathRegex,
-			Window: configuredRule.Window, Threshold: configuredRule.Threshold,
+	rulesBySource := make(map[string][]engine.Rule, len(cfg.LogSources))
+	parsersBySource := make(map[string]parser.Parser, len(cfg.LogSources))
+	ruleSource := make(map[string]string, len(cfg.Engine.Rules))
+	for _, configuredRule := range cfg.Engine.Rules {
+		rule := engine.Rule{
+			ID: configuredRule.ID, LogSource: configuredRule.LogSource, IgnoreIPs: configuredRule.IgnoreIPs,
+			PathRegex: configuredRule.PathRegex,
+			Window:    configuredRule.Window, Threshold: configuredRule.Threshold,
 			GroupBy: engine.GroupField(configuredRule.GroupBy),
 		}
+		rulesBySource[configuredRule.LogSource] = append(rulesBySource[configuredRule.LogSource], rule)
+		ruleSource[configuredRule.ID] = configuredRule.LogSource
 	}
 	liveTail := cfg.StartPosition == string(reader.StartAtEnd)
-	ruleEngine, err := engine.NewWithOptions(rules, engine.Options{
-		LiveClock: liveTail,
-		IgnoreIPs: cfg.Engine.IgnoreIPs,
-	})
-	if err != nil {
-		return fmt.Errorf("initialize rule engine: %w", err)
-	}
-	if liveTail {
-		ruleEngine.AdvanceWallClock(time.Now())
+	ruleEngines := make(map[string]*engine.Engine, len(cfg.LogSources))
+	var revisions []string
+	for _, source := range cfg.LogSources {
+		sourceParser, err := parser.New(source.Format, source.LogFormat)
+		if err != nil {
+			return fmt.Errorf("initialize parser for log source %q: %w", source.ID, err)
+		}
+		parsersBySource[source.ID] = sourceParser
+		ruleEngine, err := engine.NewWithOptions(rulesBySource[source.ID], engine.Options{
+			LiveClock: liveTail, IgnoreIPs: cfg.Engine.IgnoreIPs,
+		})
+		if err != nil {
+			return fmt.Errorf("initialize rule engine for log source %q: %w", source.ID, err)
+		}
+		if liveTail {
+			ruleEngine.AdvanceWallClock(time.Now())
+		}
+		ruleEngines[source.ID] = ruleEngine
+		revisions = append(revisions, ruleEngine.RuleRevisions()...)
 	}
 	blockPolicy, err := blockpolicy.New(cfg.BlockDuration)
 	if err != nil {
@@ -66,7 +81,7 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 	if cfg.BlockMode == config.BlockModeNFTables {
 		blockAction = &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}
 	}
-	analysisConfigID := engine.AnalysisConfigID(ruleEngine.RuleRevisions())
+	analysisConfigID := engine.AnalysisConfigID(revisions)
 	database, err := storage.Open(cfg.DatabasePath)
 	if err != nil {
 		return fmt.Errorf("initialize SQLite storage: %w", err)
@@ -84,7 +99,18 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 		return fmt.Errorf("prune expired block records: %w", err)
 	}
 	if cfg.BlockMode == config.BlockModeNFTables {
-		if err := manager.Restore(ctx, func(ip netip.Addr) bool { return ruleEngine.IsIgnored(request.Event{IP: ip}) }, func(result action.Result) {
+		if err := manager.Restore(ctx, func(ip netip.Addr, ruleID string) bool {
+			source := ruleSource[ruleID]
+			if ruleEngine, ok := ruleEngines[source]; ok {
+				return ruleEngine.IsIgnoredForRule(ip, ruleID)
+			}
+			for _, ruleEngine := range ruleEngines {
+				if ruleEngine.IsIgnored(request.Event{IP: ip}) {
+					return true
+				}
+			}
+			return false
+		}, func(result action.Result) {
 			logBlockResult(logger, result, false)
 		}); err != nil {
 			return err
@@ -109,35 +135,48 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 			ch <- control.Serve(controlCtx, opts.ControlSocketPath, manager)
 		}()
 	}
-	follower, err := reader.Open(reader.Options{
-		Path:          cfg.LogFile,
-		StartPosition: reader.StartPosition(cfg.StartPosition),
-	}, logger)
-	if err != nil {
-		return err
+	followers := make([]*reader.Follower, 0, len(cfg.LogSources))
+	for _, source := range cfg.LogSources {
+		follower, err := reader.Open(reader.Options{
+			Source: source.ID, Path: source.Path,
+			StartPosition: reader.StartPosition(cfg.StartPosition),
+		}, logger)
+		if err != nil {
+			for _, opened := range followers {
+				opened.Close()
+			}
+			return err
+		}
+		followers = append(followers, follower)
 	}
 
 	readerCtx, cancelReader := context.WithCancel(ctx)
 	defer cancelReader()
-	lines := make(chan string, lineBufferSize)
-	readerDone := make(chan error, 1)
-	go func() {
-		err := follower.Run(readerCtx, lines)
-		close(lines)
-		readerDone <- err
-	}()
+	lines := make(chan reader.Line, lineBufferSize*len(followers))
+	readerDone := make(chan error, len(followers))
+	for _, follower := range followers {
+		go func(follower *reader.Follower) { readerDone <- follower.Run(readerCtx, lines) }(follower)
+	}
 
-	logger.Info(
-		"service started",
-		"log_file", cfg.LogFile,
+	logAttributes := []any{
 		"database_file", cfg.DatabasePath,
 		"start_position", cfg.StartPosition,
 		"block_mode", cfg.BlockMode,
 		"block_duration", cfg.BlockDuration,
 		"block_tcp_ports", cfg.BlockTCPPorts,
-		"rules", len(rules),
+		"rules", len(cfg.Engine.Rules),
 		"analysis_config_id", analysisConfigID,
-	)
+	}
+	if len(cfg.LogSources) == 1 {
+		logAttributes = append([]any{"log_file", cfg.LogSources[0].Path}, logAttributes...)
+	} else {
+		sources := make(map[string]map[string]string, len(cfg.LogSources))
+		for _, source := range cfg.LogSources {
+			sources[source.ID] = map[string]string{"path": source.Path, "format": source.Format}
+		}
+		logAttributes = append([]any{"log_sources", sources}, logAttributes...)
+	}
+	logger.Info("service started", logAttributes...)
 	statistics := runStatistics{}
 	metricCollector := metrics.NewCollector()
 	metricsTicker := time.NewTicker(metrics.SampleInterval)
@@ -176,27 +215,28 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 		)
 	}()
 
-	processEvent := func(event request.Event) error {
+	processEvent := func(ruleEngine *engine.Engine, event request.Event) (bool, error) {
 		if ruleEngine.IsIgnored(event) {
-			return nil
+			return ruleEngine.Matches(event), nil
 		}
 		if ruleEngine.IsLate(event.Timestamp) {
 			statistics.lateEvents++
-			if ruleEngine.Matches(event) {
+			matched := ruleEngine.Matches(event)
+			if matched {
 				statistics.lateMatchingRequests++
 			}
 			if statistics.lateEvents == 1 {
 				logger.Warn("late request excluded from rule windows", "timestamp", event.Timestamp)
 			}
-			return nil
+			return matched, nil
 		}
 
 		statistics.engineProcessedRequests++
-		evaluations, err := ruleEngine.Process(event)
+		evaluations, matched, err := ruleEngine.ProcessWithMatch(event)
 		if err != nil {
-			return err
+			return matched, err
 		}
-		if ruleEngine.Matches(event) {
+		if matched {
 			statistics.evaluatedMatchingRequests++
 		}
 		violating := false
@@ -209,7 +249,7 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 				continue
 			}
 			if err := database.RecordDetection(context.Background(), *evaluation.Detection, event); err != nil {
-				return fmt.Errorf("persist detection: %w", err)
+				return matched, fmt.Errorf("persist detection: %w", err)
 			}
 			statistics.emittedDetections++
 			statistics.thresholdDetections++
@@ -223,22 +263,24 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 		if violating {
 			statistics.violatingRequests++
 		}
-		return nil
+		return matched, nil
 	}
 	var processingError error
+	readersRemaining := len(followers)
 readLoop:
 	for {
+		if readersRemaining == 0 && len(lines) == 0 {
+			break
+		}
 		select {
-		case line, open := <-lines:
-			if !open {
-				break readLoop
-			}
+		case line := <-lines:
 			statistics.linesRead++
 			if opts.PrintLines {
-				fmt.Fprintln(os.Stdout, line)
+				fmt.Fprintln(os.Stdout, line.Text)
 			}
 
-			event, err := parser.ParseNginx(line)
+			sourceParser := parsersBySource[line.Source]
+			event, err := sourceParser.Parse(line.Text)
 			if err != nil {
 				statistics.parseFailures++
 				if opts.PrintEvents {
@@ -247,16 +289,16 @@ readLoop:
 				continue
 			}
 			statistics.parsedRequests++
-			matches := ruleEngine.Matches(event)
-			if matches {
-				statistics.matchingRequests++
-			}
+			ruleEngine := ruleEngines[line.Source]
 			if opts.PrintEvents {
 				logRequestEvent(logger, event)
 			}
+			matches, err := processEvent(ruleEngine, event)
+			if matches {
+				statistics.matchingRequests++
+			}
 			metricCollector.Add(event, matches)
-
-			if err := processEvent(event); err != nil {
+			if err != nil {
 				processingError = fmt.Errorf("process request: %w", err)
 				break readLoop
 			}
@@ -266,7 +308,16 @@ readLoop:
 				break readLoop
 			}
 		case now := <-expiryTick:
-			ruleEngine.AdvanceWallClock(now)
+			for _, ruleEngine := range ruleEngines {
+				ruleEngine.AdvanceWallClock(now)
+			}
+		case readerErr := <-readerDone:
+			readersRemaining--
+			if readerErr != nil && processingError == nil {
+				processingError = readerErr
+				statistics.incomplete = true
+				cancelReader()
+			}
 		case serverErr := <-controlErrors:
 			controlErrors = nil
 			if serverErr != nil {
@@ -279,7 +330,16 @@ readLoop:
 	if processingError != nil {
 		statistics.incomplete = true
 		cancelReader()
-		for range lines {
+		for readersRemaining > 0 {
+			select {
+			case <-readerDone:
+				readersRemaining--
+			case <-lines:
+				statistics.unprocessedLines++
+			}
+		}
+		for len(lines) > 0 {
+			<-lines
 			statistics.unprocessedLines++
 		}
 	}
@@ -291,14 +351,11 @@ readLoop:
 			logger.Error("persist final traffic statistics", "error", err)
 		}
 	}
-	ruleEngine.Cleanup()
-	readerError := <-readerDone
+	for _, ruleEngine := range ruleEngines {
+		ruleEngine.Cleanup()
+	}
 	if processingError != nil {
 		return processingError
-	}
-	if readerError != nil {
-		statistics.incomplete = true
-		return readerError
 	}
 	if statistics.lateEvents > 0 {
 		logger.Warn("analysis excluded late requests", "late_events", statistics.lateEvents, "late_matching_requests", statistics.lateMatchingRequests)

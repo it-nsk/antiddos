@@ -1,30 +1,10 @@
 # antiddos
 
-Monitoring and blocking suspicious activity on your webserver
-
-Go service for analyzing Nginx access logs. It supports dry-run monitoring and
-optional temporary IP blocking through a dedicated nftables table.
-
-## Implemented
-
-- direct and systemd execution;
-- continuous Nginx log reading through fsnotify/inotify;
-- partial-line, truncate, and rename/create rotation handling;
-- parsing log lines into typed request events;
-- exact sliding-window analysis using log timestamps;
-- configurable request-count threshold and time window;
-- one configurable grouping field per rule;
-- structured dry-run detections;
-- optional IPv4/IPv6 blocking with short nftables timeouts;
-- graceful shutdown on SIGINT and SIGTERM;
-- automatic expiration of inactive rule groups during live tailing;
-- terminal monitoring of traffic and detections stored in SQLite.
+Linux service that analyzes Nginx access logs, records traffic and detections in SQLite, and can temporarily block client IPs through nftables.
 
 ## Quick start
 
-On a Linux amd64 server, replace the path with the Nginx access log that should
-be monitored. The first install creates `/etc/antiddos/config.json` from the
-example configuration and starts the service in safe `dry_run` mode:
+On a Linux amd64 server, replace the path with the access log for the site you want to monitor:
 
 ```shell
 curl -fsSL https://raw.githubusercontent.com/it-nsk/antiddos/dev/scripts/install.sh -o /tmp/antiddos-install.sh
@@ -32,278 +12,161 @@ sudo bash /tmp/antiddos-install.sh --log-file /var/log/nginx/access.log
 sudo -u antiddos /usr/local/bin/antiddos monitor
 ```
 
-The installer downloads the latest GitHub Release, verifies its SHA256 checksum,
-and installs and starts the service. `monitor` refreshes every two seconds; exit
-it with `Ctrl+C`. The service continues running in the background.
+The installer downloads the latest release, creates `/etc/antiddos/config.json`, and starts the service in `dry_run` mode. This records detections without changing the firewall. `monitor` refreshes every two seconds; press `Ctrl+C` to exit. The daemon keeps running.
 
-The example config uses an empty `engine.ignore_ips` whitelist and `dry_run`,
-which records detections without changing the firewall. To edit settings, such
-as the whitelist, or enable real blocking, change `/etc/antiddos/config.json`
-and restart the service:
+To change settings, edit `/etc/antiddos/config.json` and restart the service:
 
 ```shell
 sudoedit /etc/antiddos/config.json
 sudo systemctl restart antiddos
 ```
 
-Set `block_mode` to `nftables` for real IPv4/IPv6 blocking, and set
-`block_duration` to a whole number of minutes from `1m` to `60m`. Only rules
-with `group_by: "ip"` block clients. Use `dry_run` to return to observation
-mode. Existing config files are preserved by later installer runs.
+The default config watches one access log. For multiple logs, use `log_sources` and bind each rule to a source with `log_source` (example below).
 
-Installation and runtime paths:
+<details>
+<summary>Find the right Nginx access log and its format</summary>
 
-```text
-Nginx log:  path passed through --log-file
-Config:     /etc/antiddos/config.json
-Binary:     /usr/local/bin/antiddos
-SQLite:     /var/lib/antiddos/antiddos.sqlite
-Systemd:    antiddos.service
+```shell
+sudo nginx -T 2>/dev/null | grep -nE '^[[:space:]]*(server_name|log_format|access_log|error_log)'
 ```
 
-Existing configuration and SQLite data are preserved when the installer is run
-again. The server does not need Git, Go, GCC, or the project source code. Install
-a specific release with `--version v0.1.0`.
+Match the `access_log` directive to the site's `server_name`. The supported inputs are Nginx **access logs** in `nginx_combined` or `nginx_custom` format. If the directive does not name a format, Nginx uses `combined`. For a custom format, copy its complete `log_format` directive into the matching source's `log_format` setting. AntiDDoS does not read or modify `nginx.conf`.
 
-## Configuration and service control
+`error_log` and SSH/authentication logs are not supported: they need different parsers and event rules.
 
-Edit `/etc/antiddos/config.json` when its defaults do not match the server.
-Minimal example:
+</details>
+
+## Configuration
+
+The installed file is `/etc/antiddos/config.json`; the template is [`deploy/config.example.json`](deploy/config.example.json). A one-log configuration uses `log_file`. For several logs, use `log_sources` instead; do not combine the two forms.
+
+Example with two access logs, two parsers, per-rule URL patterns, and rule-level whitelists:
 
 ```json
 {
-  "log_file": "/var/log/nginx/access.log",
+  "log_sources": {
+    "main_site": {
+      "path": "/var/log/nginx/site_access.log",
+      "format": "nginx_custom",
+      "log_format": "log_format antiddos '$remote_addr - $remote_user [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\"';"
+    },
+    "admin_site": "/var/log/nginx/admin_access.log"
+  },
   "database_path": "/var/lib/antiddos/antiddos.sqlite",
   "start_position": "end",
   "block_mode": "dry_run",
-  "block_duration": "5m",
+  "block_duration": "1m",
   "block_tcp_ports": [80, 443],
   "engine": {
     "ignore_ips": [],
-    "rules": [{
-      "id": "homepage",
-      "path_regex": "^/$",
-      "window": "5s",
-      "threshold": 5,
-      "group_by": "ip"
-    }]
+    "rules": [
+      {
+        "id": "web-homepage",
+        "log_source": "main_site",
+        "path_regex": "^/$",
+        "window": "5s",
+        "threshold": 5,
+        "group_by": "ip",
+        "ignore_ips": ["192.0.2.10"]
+      },
+      {
+        "id": "inside-login",
+        "log_source": "admin_site",
+        "path_regex": "^/login$",
+        "window": "10s",
+        "threshold": 5,
+        "group_by": "ip",
+        "ignore_ips": ["198.51.100.7"]
+      }
+    ]
   }
 }
 ```
 
-Apply configuration changes with:
+`192.0.2.10` and `198.51.100.7` are documentation-only addresses. Replace them with trusted client IPs visible in the Nginx log, or remove them. The global `engine.ignore_ips` applies to all rules; a rule's `ignore_ips` applies only to that rule. Whitelisted requests remain in traffic statistics but do not enter that rule's detection window.
+
+The paths and URL patterns above are examples. Confirm the log paths and `log_format` in your Nginx config, and set each `path_regex` to a path that the corresponding site actually serves. The parser checks the URL path without query parameters. Multiple rules can use one source; each input line is read and parsed once, then evaluated against that source's rules.
+
+<details>
+<summary>Config fields and behavior</summary>
+
+| Field | Meaning |
+| --- | --- |
+| `log_file` | One Nginx access log; uses `nginx_combined`. |
+| `log_sources` | Named log files. A value can be a path string or an object with `path`, `format`, and, for custom logs, `log_format`. |
+| `log_source` | Source name a rule evaluates. Required when `log_sources` has multiple entries. |
+| `path_regex` | Regular expression matched against the URL path, without query parameters. |
+| `window`, `threshold` | Detection occurs on every matching request when the count in the sliding window reaches the threshold. |
+| `group_by` | One field: `ip`, `user_agent`, `method`, `path`, or `status`. Only `ip` rules can block. |
+| `ignore_ips` | IPv4/IPv6 addresses or CIDR networks. Supports a global list and per-rule lists. |
+| `start_position` | `end` processes new lines; `beginning` reads the existing log from the start. |
+
+`nginx_custom` requires `$remote_addr`, a timestamp (`$time_local`, `$time_iso8601`, or `$msec`), `$status`, and either `$request` or `$request_method` with `$uri`/`$request_uri`. The directive is compiled once at startup. The service account must be able to read every configured log. `monitor` shows all source names and paths.
+
+After switching to `log_sources`, remove any active `ANTIDDOS_LOG_FILE` override from `/etc/default/antiddos`. Restart the daemon after config changes.
+
+</details>
+
+## Observe or block
+
+`dry_run` is the default: detections are recorded and logged, but nftables is unchanged. To enable real blocking, install `nftables`, set `block_mode` to `nftables`, and restart `antiddos`. `block_duration` accepts whole minutes from `1m` to `60m`. Repeated detections do not extend an active block.
+
+`block_tcp_ports` limits blocking to TCP destination ports, for example `[80, 443]`. If omitted or empty, the address is blocked on all protocols and ports. For Docker traffic, the `forward` rule sees the container-side port after destination NAT. Blocking is server-wide, not limited to one Nginx site. Behind a proxy, make sure Nginx records the real client IP before enabling enforcement.
+
+The systemd unit grants `CAP_NET_ADMIN` (Linux permission to manage host networking) to the service. In `dry_run`, the launcher drops this capability before starting the analyzer. AntiDDoS creates its own `inet antiddos` table and does not flush other nftables tables.
+
+<details>
+<summary>Monitor, unblock, and service commands</summary>
 
 ```shell
+# Live monitor; defaults to 20 rows per section
+sudo -u antiddos /usr/local/bin/antiddos monitor
+
+# Show up to 100 rows per section; refresh remains every two seconds
+sudo -u antiddos /usr/local/bin/antiddos monitor --limit 100
+
+# One snapshot
+sudo -u antiddos /usr/local/bin/antiddos monitor --once --limit 5
+
+# Remove one active firewall block
+sudo -u antiddos /usr/local/bin/antiddos unblock 203.0.113.10
+
+# Control the background service
+sudo systemctl stop antiddos
+sudo systemctl start antiddos
 sudo systemctl restart antiddos
 ```
 
-To enable firewall blocking, install the `nftables` package and change
-`block_mode` to `nftables`. Keep `group_by` set to `ip` for rules that should
-block a client. `block_duration` accepts whole minutes from `1m` to `60m`;
-repeated detections do not extend an existing timeout. Other grouping fields
-still produce detections but are skipped by the blocking policy. Restart the
-service to apply the change. The systemd service runs as `antiddos` and receives
-the Linux `CAP_NET_ADMIN` capability (system permission to manage network
-firewall settings) only through its restricted service unit. In `dry_run` mode,
-the launcher drops that capability before starting the analyzer.
+`unblock` accepts one IPv4 or IPv6 address. The CLI asks the running daemon over `/run/antiddos/control.sock` to change nftables; the CLI itself has no firewall capability.
 
-The daemon creates only its own `inet antiddos` table, timeout sets capped at
-65,535 addresses per IP family, and input/forward rules. It does not flush or
-rewrite other nftables tables. A conflicting table or incompatible set/chain
-makes startup fail with an error; reaching the set limit makes new block actions
-fail visibly instead of growing firewall memory without a bound.
-Set `block_tcp_ports` to restrict blocking to TCP destination ports, for example
-`[80, 443]` for HTTP and HTTPS. If the list is empty or omitted, rules drop a
-matching address on every protocol and port. The setting applies to both
-`input` and `forward`: for Docker traffic, the forward rule sees the destination
-port after destination NAT, so use the
-container-side port when it differs from the published host port. Changing the
-list replaces AntiDDoS-managed rules and removes the legacy all-port rules it
-created; other nftables tables are untouched.
+</details>
 
-These are server firewall rules, not per-site Nginx rules. Use the actual client
-IP visible to Nginx and the host firewall when validating enforcement. Behind a
-reverse proxy, configure Nginx to trust forwarded client-IP headers only from
-the proxy's address; otherwise Nginx may log the proxy IP and AntiDDoS will
-block that shared proxy address.
+## Data and runtime
 
-The log path can instead be overridden in `/etc/default/antiddos`:
+The daemon runs as the `antiddos` system user. Its main paths are:
+
+| Item | Path |
+| --- | --- |
+| Config | `/etc/antiddos/config.json` |
+| Binary | `/usr/local/bin/antiddos` |
+| SQLite database | `/var/lib/antiddos/antiddos.sqlite` |
+| systemd unit | `antiddos.service` |
+
+SQLite contains `traffic_samples`, `detections`, and `active_blocks`. Traffic is aggregated into 15-second buckets and flushed every 15 seconds. Detection rows are written when thresholds are reached. Active block records contain the IP and expiry; unexpired blocks are restored after daemon restart with only their remaining duration. Expired block history is removed from `active_blocks`.
+
+## Development
 
 ```shell
-ANTIDDOS_LOG_FILE=/var/log/nginx/access.log
+go test ./...
+go test -race ./...
+go vet ./...
+go build ./cmd/antiddos
 ```
 
-Start and stop the daemon:
+## Release
+
+The GitHub Actions release workflow builds Linux amd64 archives for tags beginning with `v`. To install a specific release, pass `--version` to the installer, for example:
 
 ```shell
-sudo systemctl start antiddos
-sudo systemctl stop antiddos
+sudo bash /tmp/antiddos-install.sh --version v0.3.0
 ```
-
-Watch traffic, detections, and active blocks in the terminal:
-
-```shell
-sudo -u antiddos /usr/local/bin/antiddos monitor
-sudo -u antiddos /usr/local/bin/antiddos monitor --limit 100
-```
-
-Remove one IP from the active firewall blocks without restarting the daemon:
-
-```shell
-sudo -u antiddos /usr/local/bin/antiddos unblock 203.0.113.10
-```
-
-`unblock` accepts one IPv4 or IPv6 address. The CLI sends the request through
-`/run/antiddos/control.sock`; only the running daemon has `CAP_NET_ADMIN` and
-performs the nftables change. The socket is available to the `antiddos` service
-account; using `sudo -u antiddos` does not grant firewall capabilities to the
-CLI process.
-
-`monitor` refreshes every two seconds. By default it shows the latest 20 traffic
-intervals, 20 detections, and active block records. Pass `--limit N` to change
-the row limits, for example `--limit 100`; valid values are 1–1000. The refresh
-interval stays two seconds regardless of the limit. Use `Ctrl+C` to leave
-monitoring; the service keeps running. Use `monitor --once` for one snapshot. It
-opens SQLite read-only and does not require the external `sqlite3` command.
-When using the system configuration, monitor also reads `ANTIDDOS_LOG_FILE`
-from `/etc/default/antiddos`, so its displayed log path matches the daemon.
-
-The binary uses `ANTIDDOS_CONFIG` and `ANTIDDOS_LOG_FILE`. The supplied systemd
-unit sets `ANTIDDOS_CONFIG` to `/etc/antiddos/config.json` and reads the optional
-log override from `/etc/default/antiddos`. Direct foreground execution remains
-available for development with `antiddos run`.
-
-## Rule configuration
-
-The template is [deploy/config.example.json](deploy/config.example.json).
-Systemd uses `/etc/antiddos/config.json`.
-In live mode (`start_position: "end"`), expired groups are released from memory
-every second, including while the input log is quiet. Historical mode
-(`start_position: "beginning"` or `--from-start`) uses only timestamps from the
-replayed log and does not advance cleanup from wall-clock time.
-`database_path` selects the SQLite file and defaults to
-`/var/lib/antiddos/antiddos.sqlite`, which is writable by the supplied systemd
-unit through `StateDirectory=antiddos`.
-
-SQLite stores `traffic_samples`, `detections`, and `active_blocks`. Traffic
-counters are grouped into 15-second buckets by the timestamp in the Nginx log.
-They are flushed to SQLite every 15 seconds of runtime; late events update the
-their log timestamp. Each traffic row contains request counts and the sum and
-known-value count for response bytes, so average response size and byte rate can
-be calculated without storing per-request rows. Detection rows are inserted
-immediately for every request whose group is at or above the threshold and
-preserve the request timestamp and its timezone as written in the log. The
-database file is restricted to the service account.
-
-When nftables confirms a new block, its IP, rule, start time, and expiry are
-stored in `active_blocks`. `monitor` shows unexpired records in its `BLOCKS`
-section. Dry-run results and failed or skipped actions are not listed as active
-blocks. Repeated detections preserve the first expiry. On service startup in
-`nftables` mode, unexpired records are restored with only their remaining time.
-If an IP is now covered by `engine.ignore_ips`, startup removes it from the
-firewall set and deletes its block record. These configuration changes take
-effect when the service restarts. A firewall reset while the daemon is already
-running is not detected until the next restart.
-
-`traffic_samples.bucket_start_unix` identifies the start of each interval;
-`interval_seconds` gives its duration. No separate last-update timestamp is
-stored because it can be derived from the interval boundaries.
-
-Each detection stores the selected `group_by` field in `grouping_id` and its
-single value in `group_values_json`. Every request at or above the threshold is
-recorded. In `dry_run` mode, detections report what would be blocked without
-changing firewall state. In `nftables` mode, eligible detections add the exact
-IP to the corresponding timed set.
-
-Example query for recent traffic buckets:
-
-The `sqlite3` command examples require the optional SQLite command-line client.
-The service itself does not require that client to run.
-
-```shell
-sqlite3 /var/lib/antiddos/antiddos.sqlite \
-  <<'SQL'
-SELECT datetime(bucket_start_unix, 'unixepoch'),
-       1.0 * requests / interval_seconds AS requests_per_second,
-       matched_requests, response_bytes, known_response_byte_rows,
-       CASE WHEN known_response_byte_rows = 0 THEN NULL
-            ELSE 1.0 * response_bytes / known_response_byte_rows END AS average_response_bytes
-FROM traffic_samples ORDER BY bucket_start_unix DESC LIMIT 20;
-SQL
-
-sqlite3 /var/lib/antiddos/antiddos.sqlite \
-  <<'SQL'
-SELECT event_time_text, rule_id, grouping_id, group_values_json,
-       trigger_ip, trigger_user_agent, request_count, window_millis,
-       threshold, dry_run
-FROM detections ORDER BY event_time_unix_ns DESC LIMIT 50;
-SQL
-```
-
-Each rule counts matching `GET` requests in the exact `(t-W, t]` window:
-
-- `path_regex` is matched against the parsed URL path only; query parameters
-  are deliberately excluded, so `^/$` matches both `/` and `/?key=value`;
-- `window` sets `W`;
-- `threshold` sets the violation threshold `N`;
-- `group_by` selects exactly one of `ip`, `user_agent`, `method`, `path`, or
-  `status`.
-
-The fifth request triggers when `N=5`. The sixth and every later request also
-produce detections while the exact window count remains at least five. Once the
-count falls below five, detections stop until it reaches the threshold again.
-
-Each rule has its own path expression, grouping field, and independent window
-state.
-
-`engine.ignore_ips` accepts individual IPv4 and IPv6 addresses, plus CIDR
-prefixes for either address family. It does not resolve DNS names or load
-external files. Ignored requests remain in traffic statistics, including
-rule-matched counts, but do not enter rule windows or produce detections.
-Add the addresses and networks to the `ignore_ips` array, replacing these
-documentation-only examples with the addresses used by your server:
-
-```json
-"ignore_ips": [
-  "192.0.2.10",
-  "198.51.100.0/24",
-  "2001:db8::1",
-  "2001:db8:1::/48"
-]
-```
-
-Events are processed immediately in the order read from the log. An event with
-a timestamp earlier than the last processed event is excluded from rule windows
-and counted as late.
-
-## Publishing a release
-
-The workflow in `.github/workflows/release.yml` runs for tags beginning with
-`v`. It tests the project, builds the Linux amd64 archive, creates its SHA256
-file, and publishes both files in a GitHub Release. Repository Actions settings
-must allow `Read and write permissions` for the workflow token.
-
-Publish a version from the commit that should be released:
-
-```shell
-git switch dev
-git pull
-git tag -a v0.1.0 -m "Release v0.1.0"
-git push origin v0.1.0
-```
-
-Watch the run in GitHub Actions. After it succeeds, the normal installer uses
-that release automatically through the `releases/latest/download` URL.
-
-## TODO
-
-- [x] Daemon and systemd unit.
-- [x] Continuous Nginx log reader.
-- [x] Nginx parser and typed request events.
-- [x] Configurable path rules and exact sliding windows.
-- [x] One configurable grouping field per rule.
-- [x] Structured detections for every request at or above the threshold.
-- [x] Metrics and SQLite persistence.
-- [x] Terminal monitoring of SQLite traffic and detections.
-- [x] Installation script.
-- [ ] Performance measurements.

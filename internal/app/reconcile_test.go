@@ -64,7 +64,7 @@ func TestReconcileRestoresRemainingLeaseAndRemovesWhitelistedIPs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.Restore(context.Background(), func(ip netip.Addr) bool { return ruleEngine.IsIgnored(request.Event{IP: ip}) }, nil); err != nil {
+	if err := manager.Restore(context.Background(), func(ip netip.Addr, ruleID string) bool { return ruleEngine.IsIgnoredForRule(ip, ruleID) }, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(blockAction.removedIPs) != 2 {
