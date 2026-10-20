@@ -122,7 +122,9 @@ func listen(path string) (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen on control socket %q: %w", path, err)
 	}
-	if err := os.Chmod(path, 0660); err != nil {
+	// The CLI is deliberately run as the daemon user. Keep the firewall command
+	// socket private even when the web process belongs to a shared read group.
+	if err := os.Chmod(path, 0600); err != nil {
 		listener.Close()
 		os.Remove(path)
 		return nil, fmt.Errorf("set control socket permissions: %w", err)

@@ -15,3 +15,6 @@
 /internal/reader/follower_test.go
 /tools/replay_nginx_log.php
 /tools/test_reader_live.sh
+
+# Web build dependencies
+/web/node_modules/

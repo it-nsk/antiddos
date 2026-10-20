@@ -34,6 +34,7 @@ type Rule struct {
 
 type Detection struct {
 	RuleID         string
+	LogSource      string
 	RuleRevision   string
 	GroupField     GroupField
 	GroupValue     string
@@ -229,7 +230,7 @@ func (engine *Engine) ProcessWithMatch(event request.Event) ([]Evaluation, bool,
 		}
 		if violated {
 			evaluation.Detection = &Detection{
-				RuleID: rule.id, RuleRevision: rule.revision, GroupField: grouping.field,
+				RuleID: rule.id, LogSource: rule.logSource, RuleRevision: rule.revision, GroupField: grouping.field,
 				GroupValue: value, GroupKey: key, EventTimestamp: event.Timestamp,
 				Count: count, Window: rule.window, Threshold: rule.threshold, DryRun: true,
 			}

@@ -24,11 +24,14 @@ import (
 	"github.com/it-nsk/antiddos/internal/control"
 	"github.com/it-nsk/antiddos/internal/metrics"
 	"github.com/it-nsk/antiddos/internal/storage"
+	"github.com/it-nsk/antiddos/internal/webcontrol"
 )
 
 const usage = `Usage:
   antiddos run [OPTIONS]       run the analyzer directly
   antiddos monitor [OPTIONS]   show traffic, detections, and active blocks
+  antiddos web [OPTIONS]       serve the local web interface
+  antiddos user COMMAND        manage web users (add/list/password/delete)
   antiddos unblock IP          remove one IP from the firewall block set
 
 The systemd service reads /etc/antiddos/config.json. Values from
@@ -57,6 +60,10 @@ func executeCommand(ctx context.Context, args []string, logger *slog.Logger, out
 		err = run(ctx, args, logger)
 	case "monitor":
 		err = monitor(ctx, args[1:], out)
+	case "web":
+		err = webCommand(ctx, args[1:], logger, out)
+	case "user":
+		err = userCommand(ctx, args[1:], out)
 	case "unblock":
 		err = unblock(ctx, args[1:], out)
 	default:
@@ -94,6 +101,8 @@ func launch(ctx context.Context, args []string, logger *slog.Logger) error {
 		}
 		childArgs := []string{setpriv, "--no-new-privs", "--inh-caps=-net_admin", "--ambient-caps=-net_admin", "--", binary, "run"}
 		childArgs = append(childArgs, args...)
+		childArgs = append(childArgs, "--control-socket", control.DefaultSocketPath)
+		childArgs = append(childArgs, "--web-socket", webcontrol.DefaultSocketPath)
 		return syscall.Exec(setpriv, childArgs, os.Environ())
 	}
 	nftables := &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}
@@ -103,6 +112,7 @@ func launch(ctx context.Context, args []string, logger *slog.Logger) error {
 	return app.Run(ctx, app.RunOptions{
 		Config: options.Config, LogFile: options.LogFile,
 		ControlSocketPath: control.DefaultSocketPath,
+		WebSocketPath:     webcontrol.DefaultSocketPath,
 		FromStart:         options.FromStart, PrintLines: options.PrintLines, PrintEvents: options.PrintEvents,
 	}, logger)
 }
@@ -132,14 +142,14 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		return err
 	}
 	return app.Run(ctx, app.RunOptions{
-		Config: options.Config, LogFile: options.LogFile,
+		Config: options.Config, LogFile: options.LogFile, ControlSocketPath: options.ControlSocket, WebSocketPath: options.WebSocket,
 		FromStart: options.FromStart, PrintLines: options.PrintLines, PrintEvents: options.PrintEvents,
 	}, logger)
 }
 
 type runOptions struct {
-	Config, LogFile                    string
-	FromStart, PrintLines, PrintEvents bool
+	Config, LogFile, ControlSocket, WebSocket string
+	FromStart, PrintLines, PrintEvents        bool
 }
 
 func parseRunFlags(args []string, out io.Writer) (runOptions, error) {
@@ -149,6 +159,8 @@ func parseRunFlags(args []string, out io.Writer) (runOptions, error) {
 	}
 	f := flag.NewFlagSet("run", flag.ContinueOnError)
 	f.SetOutput(out)
+	f.StringVar(&o.ControlSocket, "control-socket", "", "optional local control socket")
+	f.StringVar(&o.WebSocket, "web-socket", "", "optional restricted web API socket")
 	f.StringVar(&o.Config, "config", o.Config, "configuration file")
 	f.StringVar(&o.LogFile, "log-file", o.LogFile, "override log_file")
 	f.BoolVar(&o.FromStart, "from-start", false, "read the existing log from the beginning")

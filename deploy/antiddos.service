@@ -21,6 +21,8 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectHome=true
 ProtectSystem=strict
+# The daemon validates whitelist edits and atomically replaces only its config.
+ReadWritePaths=/etc/antiddos
 ProtectKernelTunables=true
 ProtectControlGroups=true
 ProtectKernelLogs=true

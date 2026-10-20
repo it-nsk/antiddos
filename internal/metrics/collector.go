@@ -12,6 +12,7 @@ import (
 const SampleInterval = 15 * time.Second
 
 type Sample struct {
+	SourceID              string
 	BucketStartUnix       int64
 	IntervalSeconds       int64
 	Requests              int64
@@ -25,17 +26,24 @@ type SampleWriter interface {
 }
 
 type Collector struct {
-	samples map[int64]Sample
+	samples map[sampleKey]Sample
+}
+
+type sampleKey struct {
+	sourceID string
+	bucket   int64
 }
 
 func NewCollector() *Collector {
-	return &Collector{samples: make(map[int64]Sample)}
+	return &Collector{samples: make(map[sampleKey]Sample)}
 }
 
-func (collector *Collector) Add(event request.Event, matched bool) {
+func (collector *Collector) Add(sourceID string, event request.Event, matched bool) {
 	intervalSeconds := int64(SampleInterval / time.Second)
 	bucketStart := event.Timestamp.Unix() / intervalSeconds * intervalSeconds
-	sample := collector.samples[bucketStart]
+	key := sampleKey{sourceID: sourceID, bucket: bucketStart}
+	sample := collector.samples[key]
+	sample.SourceID = sourceID
 	sample.BucketStartUnix = bucketStart
 	sample.IntervalSeconds = intervalSeconds
 	sample.Requests++
@@ -46,7 +54,7 @@ func (collector *Collector) Add(event request.Event, matched bool) {
 		sample.ResponseBytes += *event.ResponseBytes
 		sample.KnownResponseByteRows++
 	}
-	collector.samples[bucketStart] = sample
+	collector.samples[key] = sample
 }
 
 func (collector *Collector) Flush(ctx context.Context, writer SampleWriter) error {
@@ -54,17 +62,20 @@ func (collector *Collector) Flush(ctx context.Context, writer SampleWriter) erro
 		return nil
 	}
 
-	bucketStarts := make([]int64, 0, len(collector.samples))
-	for bucketStart := range collector.samples {
-		bucketStarts = append(bucketStarts, bucketStart)
+	keys := make([]sampleKey, 0, len(collector.samples))
+	for key := range collector.samples {
+		keys = append(keys, key)
 	}
-	sort.Slice(bucketStarts, func(left, right int) bool {
-		return bucketStarts[left] < bucketStarts[right]
+	sort.Slice(keys, func(left, right int) bool {
+		if keys[left].bucket == keys[right].bucket {
+			return keys[left].sourceID < keys[right].sourceID
+		}
+		return keys[left].bucket < keys[right].bucket
 	})
 
-	samples := make([]Sample, 0, len(bucketStarts))
-	for _, bucketStart := range bucketStarts {
-		samples = append(samples, collector.samples[bucketStart])
+	samples := make([]Sample, 0, len(keys))
+	for _, key := range keys {
+		samples = append(samples, collector.samples[key])
 	}
 	if err := writer.WriteTrafficSamples(ctx, samples); err != nil {
 		return err

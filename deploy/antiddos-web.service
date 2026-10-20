@@ -1,0 +1,37 @@
+[Unit]
+Description=AntiDDoS local web interface
+After=antiddos.service
+Wants=antiddos.service
+
+[Service]
+Type=simple
+User=antiddos-web
+Group=antiddos-web
+SupplementaryGroups=antiddos
+Environment=ANTIDDOS_WEB_LISTEN=127.0.0.1:8080
+Environment=ANTIDDOS_WEB_ORIGIN=http://127.0.0.1:8080
+EnvironmentFile=-/etc/default/antiddos-web
+ExecStart=/usr/local/bin/antiddos web --listen ${ANTIDDOS_WEB_LISTEN} --origin ${ANTIDDOS_WEB_ORIGIN}
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+StateDirectory=antiddos-web
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

@@ -22,6 +22,16 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web interface
+        run: npm ci --prefix web && npm run build --prefix web
+
       - name: Verify source
         run: |
           go test ./...
@@ -38,6 +48,7 @@ jobs:
           package_dir="dist/package"
           mkdir -p "$package_dir"
           go build -trimpath -o "$package_dir/antiddos" ./cmd/antiddos
+          install -m 0644 deploy/antiddos-web.service "$package_dir/antiddos-web.service"
           install -m 0644 deploy/antiddos.service "$package_dir/antiddos.service"
           install -m 0644 deploy/config.example.json "$package_dir/config.example.json"
           install -m 0644 deploy/antiddos.env.example "$package_dir/antiddos.env.example"

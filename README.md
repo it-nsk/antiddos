@@ -7,12 +7,11 @@ Linux service that analyzes Nginx access logs, records traffic and detections in
 On a Linux amd64 server, replace the path with the access log for the site you want to monitor:
 
 ```shell
-curl -fsSL https://raw.githubusercontent.com/it-nsk/antiddos/dev/scripts/install.sh -o /tmp/antiddos-install.sh
-sudo bash /tmp/antiddos-install.sh --log-file /var/log/nginx/access.log
+curl -fsSL https://raw.githubusercontent.com/it-nsk/antiddos/dev/scripts/install.sh -o /tmp/antiddos-install.sh && sudo bash /tmp/antiddos-install.sh --log-file /var/log/nginx/access.log --web
 sudo -u antiddos /usr/local/bin/antiddos monitor
 ```
 
-The installer downloads the latest release, creates `/etc/antiddos/config.json`, and starts the service in `dry_run` mode. This records detections without changing the firewall. `monitor` refreshes every two seconds; press `Ctrl+C` to exit. The daemon keeps running.
+The first command downloads and installs the latest release, creates both systemd services, and starts them in `dry_run` mode. On a fresh install it creates the GUI login `admin` and prompts for its password twice. The installer prints the config, traffic database, GUI user database, and browser/SSH access instructions. It creates `/etc/antiddos/config.json` from the example only if the file does not already exist; the traffic SQLite database is created when the daemon starts. `dry_run` records detections without changing the firewall. `monitor` refreshes every two seconds; press `Ctrl+C` to exit. The daemon keeps running.
 
 To change settings, edit `/etc/antiddos/config.json` and restart the service:
 
@@ -20,6 +19,62 @@ To change settings, edit `/etc/antiddos/config.json` and restart the service:
 sudoedit /etc/antiddos/config.json
 sudo systemctl restart antiddos
 ```
+
+### Optional web interface
+
+The Quick Start command above installs the GUI and creates its first administrator. To enable it after installing the daemon without `--web`, rerun the installer with `--web`. The GUI listens on `127.0.0.1:8080` by default; open it on the server or create an SSH tunnel from your computer:
+
+```shell
+sudo bash /tmp/antiddos-install.sh --web
+# On your computer, in a separate terminal:
+ssh -N -L 8080:127.0.0.1:8080 <ssh-user>@<server-address>
+# Then open http://127.0.0.1:8080 in your computer's browser
+```
+
+Replace `<ssh-user>` and `<server-address>` with your server's SSH login and hostname or IP. Keep the SSH command running while using the GUI. The installer prints these steps after a successful web install.
+
+On a fresh GUI install, the installer creates login `admin` and securely prompts for its password. There is no public registration or default password. User records and sessions are stored in `/var/lib/antiddos-web/users.sqlite`. The GUI shows traffic graphs, detections, active blocks, all configured log sources, and lets an `admin` edit each rule's `path_regex` and whitelist, the global whitelist, and the `dry_run`/`nftables` mode. Enabling real blocking requires explicit confirmation. A `viewer` can only view data. Edits are validated and saved to `/etc/antiddos/config.json`; restart `antiddos` to apply them. The GUI does not restart systemd services. The overview keeps the combined charts and, for multiple logs, provides collapsible per-source charts; per-source history starts after upgrading because older samples were stored only as a combined total. Detection rows show their source log. Manage additional accounts locally:
+
+```shell
+sudo -u antiddos-web /usr/local/bin/antiddos user add --role viewer operator
+sudo -u antiddos-web /usr/local/bin/antiddos user list
+sudo -u antiddos-web /usr/local/bin/antiddos user password operator
+sudo -u antiddos-web /usr/local/bin/antiddos user delete operator
+```
+
+To test the GUI on a development checkout, build its embedded assets and run the browser tests:
+
+```shell
+cd /www/antiddos
+npm --prefix web ci
+npm --prefix web run test:e2e
+go test ./cmd/... ./internal/...
+go test -race ./cmd/... ./internal/...
+go vet ./cmd/... ./internal/...
+```
+
+To open the GUI locally with isolated synthetic logs, statistics, and users (no `sudo` and no system service):
+
+```shell
+npm --prefix web run build
+cd web
+node tests/serve.mjs
+```
+
+Open `http://127.0.0.1:18082` and sign in as `admin` with the test-only password `test-only-long-password`. The fixture has two log sources and separate rule whitelists. Stop it with `Ctrl+C`. To view the browser-test report, from `web/` run `npx playwright show-report ../runtime/web-e2e/report`.
+
+To install the current checkout on a Linux test server as real systemd services, first build the UI and binary, then run the installer locally. It preserves `/etc/antiddos/config.json`, installs both units, creates the web account, and prompts for the first admin password:
+
+```shell
+npm --prefix web run build && go build -o antiddos ./cmd/antiddos
+sudo bash scripts/install.sh --local --web
+```
+
+The installer prints the GUI URL and SSH tunnel command. After changing rules or block mode in the GUI, restart only the daemon with `sudo systemctl restart antiddos`; the GUI service stays up.
+
+For a manual server test, sign in as `admin`. Check **Overview** for traffic graphs and configured log sources; **Detections** for recent detections and active blocks; **Rules and filters** for each rule's path expression and whitelist. Change a rule expression to `^/login$`, add a documentation IP such as `192.0.2.10`, save, and confirm the page says a daemon restart is required. Restart with `sudo systemctl restart antiddos`, reload the page, and confirm the saved values remain. Add a `viewer` with the CLI and sign in as that user: the data remains visible, while rule editing and the Users page are unavailable. Changing a user's password with the CLI revokes that user's existing sessions.
+
+For remote access, keep the GUI bound to loopback and use `ssh -L 8080:127.0.0.1:8080 user@server`. A public deployment should use a dedicated HTTPS virtual host in the existing reverse proxy; set its exact URL as `ANTIDDOS_WEB_ORIGIN` in `/etc/default/antiddos-web`, then restart `antiddos-web`. The web service has no firewall capability and talks to the daemon through a restricted Unix socket that exposes statistics and validated rule/whitelist edits.
 
 The default config watches one access log. For multiple logs, use `log_sources` and bind each rule to a source with `log_source` (example below).
 
@@ -151,6 +206,8 @@ The daemon runs as the `antiddos` system user. Its main paths are:
 | Binary | `/usr/local/bin/antiddos` |
 | SQLite database | `/var/lib/antiddos/antiddos.sqlite` |
 | systemd unit | `antiddos.service` |
+| Web users and sessions | `/var/lib/antiddos-web/users.sqlite` |
+| Optional web unit | `antiddos-web.service` |
 
 SQLite contains `traffic_samples`, `detections`, and `active_blocks`. Traffic is aggregated into 15-second buckets and flushed every 15 seconds. Detection rows are written when thresholds are reached. Active block records contain the IP and expiry; unexpired blocks are restored after daemon restart with only their remaining duration. Expired block history is removed from `active_blocks`.
 

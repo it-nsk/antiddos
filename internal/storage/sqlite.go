@@ -85,8 +85,19 @@ func (store *Store) createSchema(ctx context.Context) error {
 			response_bytes INTEGER NOT NULL CHECK (response_bytes >= 0),
 			known_response_byte_rows INTEGER NOT NULL CHECK (known_response_byte_rows >= 0 AND known_response_byte_rows <= requests)
 		)`,
+		`CREATE TABLE IF NOT EXISTS traffic_samples_by_source (
+			source_id TEXT NOT NULL,
+			bucket_start_unix INTEGER NOT NULL,
+			interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+			requests INTEGER NOT NULL CHECK (requests >= 0),
+			matched_requests INTEGER NOT NULL CHECK (matched_requests >= 0 AND matched_requests <= requests),
+			response_bytes INTEGER NOT NULL CHECK (response_bytes >= 0),
+			known_response_byte_rows INTEGER NOT NULL CHECK (known_response_byte_rows >= 0 AND known_response_byte_rows <= requests),
+			PRIMARY KEY (source_id, bucket_start_unix)
+		)`,
 		`CREATE TABLE IF NOT EXISTS detections (
 			id INTEGER PRIMARY KEY,
+			log_source TEXT NOT NULL DEFAULT '',
 			event_time_unix_ns INTEGER NOT NULL,
 			event_time_text TEXT NOT NULL,
 		recorded_at_unix_ms INTEGER NOT NULL,
@@ -112,6 +123,9 @@ func (store *Store) createSchema(ctx context.Context) error {
 			return fmt.Errorf("create SQLite schema: %w", err)
 		}
 	}
+	if err := store.addColumnIfMissing(ctx, "detections", "log_source", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	if err := store.removeObsoleteColumns(ctx, "traffic_samples", "updated_at_unix_ms"); err != nil {
 		return err
 	}
@@ -128,6 +142,37 @@ func (store *Store) createSchema(ctx context.Context) error {
 	} {
 		if _, err := store.db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("create SQLite index: %w", err)
+		}
+	}
+	return nil
+}
+
+func (store *Store) addColumnIfMissing(ctx context.Context, table, column, declaration string) error {
+	rows, err := store.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return fmt.Errorf("read %s schema: %w", table, err)
+		}
+		found = found || name == column
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate %s schema: %w", table, err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close %s schema: %w", table, err)
+	}
+	if !found {
+		if _, err := store.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+declaration); err != nil {
+			return fmt.Errorf("add %s.%s: %w", table, column, err)
 		}
 	}
 	return nil
@@ -240,6 +285,7 @@ func (store *Store) migrateDetections(ctx context.Context) error {
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE detections_new (
 		id INTEGER PRIMARY KEY,
+		log_source TEXT NOT NULL DEFAULT '',
 		event_time_unix_ns INTEGER NOT NULL,
 		event_time_text TEXT NOT NULL,
 		recorded_at_unix_ms INTEGER NOT NULL,
@@ -255,7 +301,7 @@ func (store *Store) migrateDetections(ctx context.Context) error {
 	)`); err != nil {
 		return fmt.Errorf("create migrated detections table: %w", err)
 	}
-	const persistedColumns = `id, event_time_unix_ns, event_time_text, recorded_at_unix_ms,
+	const persistedColumns = `id, log_source, event_time_unix_ns, event_time_text, recorded_at_unix_ms,
 		rule_id, grouping_id, group_values_json, trigger_ip, trigger_user_agent,
 		request_count, window_millis, threshold, dry_run`
 	if _, err := tx.ExecContext(ctx, `INSERT INTO detections_new (`+persistedColumns+`) SELECT `+persistedColumns+` FROM detections`); err != nil {
@@ -296,6 +342,18 @@ func (store *Store) WriteTrafficSamples(ctx context.Context, samples []metrics.S
 		return fmt.Errorf("prepare traffic sample write: %w", err)
 	}
 	defer statement.Close()
+	sourceStatement, err := tx.PrepareContext(ctx, `INSERT INTO traffic_samples_by_source (
+		source_id,bucket_start_unix,interval_seconds,requests,matched_requests,response_bytes,known_response_byte_rows
+	) VALUES (?,?,?,?,?,?,?)
+	ON CONFLICT(source_id,bucket_start_unix) DO UPDATE SET
+		requests = traffic_samples_by_source.requests + excluded.requests,
+		matched_requests = traffic_samples_by_source.matched_requests + excluded.matched_requests,
+		response_bytes = traffic_samples_by_source.response_bytes + excluded.response_bytes,
+		known_response_byte_rows = traffic_samples_by_source.known_response_byte_rows + excluded.known_response_byte_rows`)
+	if err != nil {
+		return fmt.Errorf("prepare per-source traffic sample write: %w", err)
+	}
+	defer sourceStatement.Close()
 
 	for _, sample := range samples {
 		if _, err := statement.ExecContext(ctx,
@@ -307,6 +365,9 @@ func (store *Store) WriteTrafficSamples(ctx context.Context, samples []metrics.S
 			sample.KnownResponseByteRows,
 		); err != nil {
 			return fmt.Errorf("write traffic sample at %d: %w", sample.BucketStartUnix, err)
+		}
+		if _, err := sourceStatement.ExecContext(ctx, sample.SourceID, sample.BucketStartUnix, sample.IntervalSeconds, sample.Requests, sample.MatchedRequests, sample.ResponseBytes, sample.KnownResponseByteRows); err != nil {
+			return fmt.Errorf("write traffic sample for source %q at %d: %w", sample.SourceID, sample.BucketStartUnix, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -321,11 +382,12 @@ func (store *Store) RecordDetection(ctx context.Context, detection engine.Detect
 		return fmt.Errorf("encode detection group values: %w", err)
 	}
 	_, err = store.db.ExecContext(ctx, `INSERT INTO detections (
-		event_time_unix_ns, event_time_text, recorded_at_unix_ms,
+		log_source, event_time_unix_ns, event_time_text, recorded_at_unix_ms,
 		rule_id, grouping_id, group_values_json,
 		trigger_ip, trigger_user_agent, request_count, window_millis,
 		threshold, dry_run
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		detection.LogSource,
 		event.Timestamp.UnixNano(),
 		event.Timestamp.Format(time.RFC3339Nano),
 		time.Now().UnixMilli(),

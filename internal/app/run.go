@@ -13,6 +13,7 @@ import (
 	"github.com/it-nsk/antiddos/internal/blockmanager"
 	"github.com/it-nsk/antiddos/internal/blockpolicy"
 	"github.com/it-nsk/antiddos/internal/config"
+	"github.com/it-nsk/antiddos/internal/configservice"
 	"github.com/it-nsk/antiddos/internal/control"
 	"github.com/it-nsk/antiddos/internal/engine"
 	"github.com/it-nsk/antiddos/internal/metrics"
@@ -20,6 +21,7 @@ import (
 	"github.com/it-nsk/antiddos/internal/reader"
 	"github.com/it-nsk/antiddos/internal/request"
 	"github.com/it-nsk/antiddos/internal/storage"
+	"github.com/it-nsk/antiddos/internal/webcontrol"
 )
 
 const lineBufferSize = 256
@@ -27,7 +29,7 @@ const lineBufferSize = 256
 // RunOptions contains command-line choices parsed by cmd/antiddos.
 type RunOptions struct {
 	Config, LogFile                    string
-	ControlSocketPath                  string
+	ControlSocketPath, WebSocketPath   string
 	FromStart, PrintLines, PrintEvents bool
 }
 
@@ -116,23 +118,39 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 			return err
 		}
 	}
-	var controlErrors <-chan error
-	controlCtx, cancelControl := context.WithCancel(ctx)
-	var controlStopped <-chan struct{}
+	localErrors := make(chan error, 2)
+	localCtx, cancelLocal := context.WithCancel(ctx)
+	localServers := 0
 	defer func() {
-		cancelControl()
-		if controlStopped != nil {
-			<-controlStopped
+		cancelLocal()
+		for range localServers {
+			<-localErrors
 		}
 	}()
 	if cfg.BlockMode == config.BlockModeNFTables && opts.ControlSocketPath != "" {
-		ch := make(chan error, 1)
-		stopped := make(chan struct{})
-		controlErrors = ch
-		controlStopped = stopped
+		localServers++
 		go func() {
-			defer close(stopped)
-			ch <- control.Serve(controlCtx, opts.ControlSocketPath, manager)
+			localErrors <- control.Serve(localCtx, opts.ControlSocketPath, manager)
+		}()
+	}
+	if opts.WebSocketPath != "" {
+		webConfig, err := (&configservice.Service{Path: opts.Config}).Read()
+		if err != nil {
+			return fmt.Errorf("read web configuration revision: %w", err)
+		}
+		webReader, err := storage.OpenReader(cfg.DatabasePath)
+		if err != nil {
+			return fmt.Errorf("open web statistics reader: %w", err)
+		}
+		defer webReader.Close()
+		service := &webcontrol.Service{
+			Config: &configservice.Service{Path: opts.Config},
+			Stats:  webReader,
+			Status: webcontrol.Status{ConfigRevision: webConfig.Revision, StartedAt: time.Now(), BlockMode: cfg.BlockMode},
+		}
+		localServers++
+		go func() {
+			localErrors <- webcontrol.Serve(localCtx, opts.WebSocketPath, service)
 		}()
 	}
 	followers := make([]*reader.Follower, 0, len(cfg.LogSources))
@@ -297,7 +315,7 @@ readLoop:
 			if matches {
 				statistics.matchingRequests++
 			}
-			metricCollector.Add(event, matches)
+			metricCollector.Add(line.Source, event, matches)
 			if err != nil {
 				processingError = fmt.Errorf("process request: %w", err)
 				break readLoop
@@ -318,10 +336,10 @@ readLoop:
 				statistics.incomplete = true
 				cancelReader()
 			}
-		case serverErr := <-controlErrors:
-			controlErrors = nil
+		case serverErr := <-localErrors:
+			localServers--
 			if serverErr != nil {
-				processingError = fmt.Errorf("control socket: %w", serverErr)
+				processingError = fmt.Errorf("local API socket: %w", serverErr)
 				break readLoop
 			}
 		}
