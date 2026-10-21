@@ -84,9 +84,9 @@ function Whitelist({state,session,onSaved,report}:{state:ConfigState;session:Ses
  const [rules,setRules]=useState<Record<string,string[]>>(Object.fromEntries(state.config.rules.map(r=>[r.id,[...r.ignore_ips]])));
  const [regexes,setRegexes]=useState<Record<string,string>>(Object.fromEntries(state.config.rules.map(r=>[r.id,r.path_regex])));
  const [blockMode,setBlockMode]=useState<'dry_run'|'nftables'>(state.config.block_mode);
- const [dirty,setDirty]=useState(false),[busy,setBusy]=useState(false),[message,setMessage]=useState('');
+ const [dirty,setDirty]=useState(false),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[saved,setSaved]=useState(false);
  const readOnly=session.user.role!=='admin';
- function reset(c:Config){setDoc(c);setGlobal([...c.ignore_ips]);setRules(Object.fromEntries(c.rules.map(r=>[r.id,[...r.ignore_ips]])));setRegexes(Object.fromEntries(c.rules.map(r=>[r.id,r.path_regex])));setBlockMode(c.block_mode);setDirty(false);setMessage('')}
+ function reset(c:Config){setDoc(c);setGlobal([...c.ignore_ips]);setRules(Object.fromEntries(c.rules.map(r=>[r.id,[...r.ignore_ips]])));setRegexes(Object.fromEntries(c.rules.map(r=>[r.id,r.path_regex])));setBlockMode(c.block_mode);setDirty(false);setMessage('');setSaved(false)}
  useEffect(()=>{if(!dirty&&state.config.revision!==doc.revision)reset(state.config)},[state.config,dirty,doc.revision]);
  const parse=(items:string[])=>items.map(v=>v.trim()).filter(Boolean);
  const setGlobalIP=(index:number,value:string)=>{setGlobal(items=>items.map((item,i)=>i===index?value:item));setDirty(true)};
@@ -99,10 +99,10 @@ function Whitelist({state,session,onSaved,report}:{state:ConfigState;session:Ses
   const modeChanged=blockMode!==doc.block_mode;
   const confirmRealBlocks=modeChanged&&blockMode==='nftables';
   if(confirmRealBlocks&&!window.confirm('Включить реальные блокировки? После сохранения и перезапуска AntiDDoS будет блокировать IP в firewall через nftables. Продолжить?'))return;
-  setBusy(true);setMessage('');
+  setBusy(true);setMessage('');setSaved(false);
   try{
    const result=await api<ConfigState>('config/rules',{method:'PUT',headers:{'X-CSRF-Token':session.csrf},body:JSON.stringify({revision:doc.revision,ignore_ips:parse(global),rules:Object.fromEntries(doc.rules.map(r=>[r.id,{ignore_ips:parse(rules[r.id]||[]),path_regex:regexes[r.id]??r.path_regex}])),...(modeChanged?{block_mode:blockMode}:{}),confirm_real_blocks:confirmRealBlocks})});
-   reset(result.config);onSaved(result);setMessage('Сохранено. Перезапустите antiddos для применения.');
+   reset(result.config);onSaved(result);setSaved(true);setMessage('Сохранено. Перезапустите antiddos для применения.');
   }catch(e){report(e);setMessage(errText(e))}finally{setBusy(false)}
  }
  return <>
@@ -122,7 +122,7 @@ function Whitelist({state,session,onSaved,report}:{state:ConfigState;session:Ses
    </div>
   </section>)}
   {!readOnly&&<div className="savebar"><button className="primary" disabled={!dirty||busy} onClick={save}>{busy?'Сохраняем…':'Сохранить изменения'}</button><button onClick={()=>reset(state.config)}>Отменить изменения</button><span>Whitelist, regex и режим применятся после перезапуска демона.</span></div>}
-  {message&&<div className="notice" role="status"><strong>Сохранено.</strong> Перезапустите antiddos для применения:<br/><code>sudo systemctl restart antiddos</code></div>}
+  {message&&(saved?<div className="notice" role="status"><strong>Сохранено.</strong> Перезапустите antiddos для применения:<br/><code>sudo systemctl restart antiddos</code></div>:<div className="error" role="alert">{message}</div>)}
   <section className="panel"><div className="panel-head"><h2>Источники логов</h2></div><div className="table-wrap"><table><thead><tr><th>Имя</th><th>Путь</th><th>Формат</th></tr></thead><tbody>{doc.sources.map(s=><tr key={s.id}><td>{s.id}</td><td><code>{s.path}</code></td><td>{s.format}</td></tr>)}</tbody></table></div></section>
  </>
 }

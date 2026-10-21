@@ -206,3 +206,22 @@ func TestSecureOriginAndOptions(t *testing.T) {
 		t.Fatal("HTTPS cookie not Secure")
 	}
 }
+
+func TestMissingDaemonSocketReturnsUnavailableWithoutLosingSession(t *testing.T) {
+	s := fixtureServer(t)
+	cookie, session := loginAs(t, s, "admin")
+	s.backend = webcontrol.NewClient(filepath.Join(t.TempDir(), "missing.sock"))
+	for _, path := range []string{"/api/dashboard", "/api/config"} {
+		w := request(s, "GET", path, "", cookie, "", "")
+		if w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), "missing.sock") {
+			t.Fatalf("%s: status=%d body=%s", path, w.Code, w.Body.String())
+		}
+	}
+	w := request(s, "PUT", "/api/config/rules", `{}`, cookie, session.CSRF, s.origin.String())
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("save while daemon unavailable: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(s, "GET", "/api/session", "", cookie, "", ""); w.Code != http.StatusOK {
+		t.Fatalf("daemon outage revoked independent web session: %d", w.Code)
+	}
+}
