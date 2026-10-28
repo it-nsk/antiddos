@@ -1,3 +1,4 @@
+// Command uds-probe checks access to the checker Unix socket.
 package main
 
 import (

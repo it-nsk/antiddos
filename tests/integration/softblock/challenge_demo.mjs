@@ -14,7 +14,7 @@ const chrome = process.env.CHROME_PATH || '/usr/bin/google-chrome';
 const headless = process.env.SOFTBLOCK_DEMO_HEADLESS === '1';
 
 execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-keyout', key, '-out', cert, '-subj', '/CN=example.test', '-addext', 'subjectAltName=DNS:example.test'], { stdio: 'ignore' });
-execFileSync('go', ['build', '-o', binary, './tests/integration/softblock/challenge_fixture.go'], { cwd: root, env: process.env, stdio: 'inherit' });
+execFileSync('go', ['build', '-o', binary, './tests/integration/softblock/cmd/challenge-fixture'], { cwd: root, env: process.env, stdio: 'inherit' });
 const portServer = createServer();
 await new Promise(resolvePort => portServer.listen(0, '127.0.0.1', resolvePort));
 const port = portServer.address().port;

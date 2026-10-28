@@ -1,3 +1,4 @@
+// Command challenge-fixture runs the browser acceptance fixture.
 package main
 
 import (

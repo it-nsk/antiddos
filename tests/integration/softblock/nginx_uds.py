@@ -76,7 +76,7 @@ try:
     p=run(['go','build','-o',str(d/'antiddos'),'./cmd/antiddos'],cwd=ROOT,env=env); check('build checker',p.returncode==0,p.stderr)
     if p.returncode: raise RuntimeError('build failed')
     probe_env={**env,'CGO_ENABLED':'0'}
-    p=run(['go','build','-o',str(d/'uds-probe'),'./tests/integration/softblock/uds_probe.go'],cwd=ROOT,env=probe_env); check('build UDS permission probe',p.returncode==0,p.stderr)
+    p=run(['go','build','-o',str(d/'uds-probe'),'./tests/integration/softblock/cmd/uds-probe'],cwd=ROOT,env=probe_env); check('build UDS permission probe',p.returncode==0,p.stderr)
     if p.returncode: raise RuntimeError('probe build failed')
     p=run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-keyout',str(d/'tls.key'),'-out',str(d/'tls.crt'),'-subj','/CN=example.test','-addext','subjectAltName=DNS:example.test']); check('temporary TLS certificate',p.returncode==0)
     if p.returncode: raise RuntimeError('openssl failed')
