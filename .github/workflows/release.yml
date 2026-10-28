@@ -50,7 +50,10 @@ jobs:
           go build -trimpath -o "$package_dir/antiddos" ./cmd/antiddos
           install -m 0644 deploy/antiddos-web.service "$package_dir/antiddos-web.service"
           install -m 0644 deploy/antiddos.service "$package_dir/antiddos.service"
+          install -m 0644 deploy/antiddos-challenge.service "$package_dir/antiddos-challenge.service"
+          install -m 0644 deploy/antiddos-soft-block.conf "$package_dir/antiddos-soft-block.conf"
           install -m 0644 deploy/config.example.json "$package_dir/config.example.json"
+          install -m 0644 deploy/config.security.example.json "$package_dir/config.security.example.json"
           install -m 0644 deploy/antiddos.env.example "$package_dir/antiddos.env.example"
           tar -C "$package_dir" -czf dist/antiddos-linux-amd64.tar.gz .
           cd dist

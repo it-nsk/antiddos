@@ -157,6 +157,16 @@ func TestNFTablesRemoveTreatsMissingElementAsAlreadyAbsent(t *testing.T) {
 	}
 }
 
+func TestNFTRuleLineIgnoresChainDeclarationHandle(t *testing.T) {
+	if body, handle, ok := nftRuleLine("chain input { # handle 3"); ok || body != "" || handle != 0 {
+		t.Fatalf("chain declaration parsed as rule: body=%q handle=%d ok=%t", body, handle, ok)
+	}
+	body, handle, ok := nftRuleLine(`tcp dport 443 ip saddr @blocked_ipv4 drop comment "antiddos-managed:input:ip:tcp:443" # handle 4`)
+	if !ok || handle != 4 || !strings.Contains(body, "antiddos-managed:input:ip:tcp:443") {
+		t.Fatalf("managed rule not parsed: body=%q handle=%d ok=%t", body, handle, ok)
+	}
+}
+
 func TestNFTablesInitializeCreatesOnlyOwnedObjectsAndIsIdempotent(t *testing.T) {
 	objects := make(map[string]string)
 	rules := make(map[string][]string)
@@ -262,6 +272,84 @@ func TestNFTablesInitializeRefusesUnownedTable(t *testing.T) {
 	}}
 	if err := nftAction.Initialize(context.Background()); err == nil || !strings.Contains(err.Error(), "not marked as AntiDDoS-owned") {
 		t.Fatalf("Initialize error = %v, want unowned-table rejection", err)
+	}
+}
+
+func TestNFTablesRemoveOwnedTableValidatesSchemaBeforeExactDelete(t *testing.T) {
+	table := `table inet antiddos {
+ comment "managed by antiddos"
+ set blocked_ipv4 {
+ }
+ set blocked_ipv6 {
+ }
+ chain input {
+ }
+ chain forward {
+ }
+}`
+	var deleted bool
+	runner := func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		switch joined {
+		case "list table inet antiddos":
+			return []byte(table), nil
+		case "list set inet antiddos blocked_ipv4":
+			return []byte("set blocked_ipv4 { type ipv4_addr; flags timeout; size 65535; }"), nil
+		case "list set inet antiddos blocked_ipv6":
+			return []byte("set blocked_ipv6 { type ipv6_addr; flags timeout; size 65535; }"), nil
+		case "-a list chain inet antiddos input":
+			return []byte("chain input { type filter hook input priority -10; policy accept;\n ip saddr @blocked_ipv4 drop # handle 1\n ip6 saddr @blocked_ipv6 drop # handle 2\n}"), nil
+		case "-a list chain inet antiddos forward":
+			return []byte("chain forward { type filter hook forward priority -10; policy accept;\n ip saddr @blocked_ipv4 drop comment \"antiddos-managed:forward:ip:all\" # handle 3\n ip6 saddr @blocked_ipv6 drop comment \"antiddos-managed:forward:ip6:all\" # handle 4\n}"), nil
+		case "delete table inet antiddos":
+			deleted = true
+			return nil, nil
+		default:
+			return nil, fmt.Errorf("unexpected command %q", joined)
+		}
+	}
+	removed, err := (&NFTables{run: runner}).RemoveOwnedTable(context.Background())
+	if err != nil || !removed || !deleted {
+		t.Fatalf("removed=%v deleted=%v err=%v", removed, deleted, err)
+	}
+}
+
+func TestNFTablesRemoveOwnedTableRefusesUnexpectedObjectsAndRules(t *testing.T) {
+	base := `table inet antiddos {
+ comment "managed by antiddos"
+ set blocked_ipv4 { }
+ set blocked_ipv6 { }
+ chain input { }
+ chain forward { }
+%s
+}`
+	for name, extra := range map[string]string{"extra chain": " chain foreign { }", "extra set": " set foreign { }"} {
+		t.Run(name, func(t *testing.T) {
+			deleted := false
+			nftAction := NFTables{run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+				if strings.Join(args, " ") == "list table inet antiddos" {
+					return []byte(fmt.Sprintf(base, extra)), nil
+				}
+				deleted = true
+				return nil, nil
+			}}
+			if _, err := nftAction.RemoveOwnedTable(context.Background()); err == nil || !strings.Contains(err.Error(), "unexpected") {
+				t.Fatalf("unexpected schema accepted: %v", err)
+			}
+			if deleted {
+				t.Fatal("delete attempted after schema rejection")
+			}
+		})
+	}
+}
+
+func TestNFTablesRemoveOwnedTableMissingIsNotClaimedAsRemoved(t *testing.T) {
+	nftAction := NFTables{run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		return []byte("Error: No such file or directory"), errors.New("exit status 1")
+	}}
+	removed, err := nftAction.RemoveOwnedTable(context.Background())
+	if err != nil || removed {
+		t.Fatalf("removed=%v err=%v", removed, err)
 	}
 }
 

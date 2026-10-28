@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"net/netip"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
+
+var nftObjectDeclaration = regexp.MustCompile(`(?m)^\s*(set|chain)\s+([A-Za-z0-9_-]+)\s+\{`)
 
 const (
 	NftFamily       = "inet"
@@ -175,6 +178,100 @@ func (nftAction *NFTables) Initialize(ctx context.Context) error {
 	return nil
 }
 
+// ValidateOwnedTable checks the complete AntiDDoS-owned schema without changing
+// firewall state. A false result means the table is absent.
+func (nftAction *NFTables) ValidateOwnedTable(ctx context.Context) (bool, error) {
+	return nftAction.validateOwnedTable(ctx, false)
+}
+
+// RemoveOwnedTable validates the complete AntiDDoS-owned schema before deleting
+// its table. It never flushes a ruleset or touches any other nftables object.
+func (nftAction *NFTables) RemoveOwnedTable(ctx context.Context) (bool, error) {
+	return nftAction.validateOwnedTable(ctx, true)
+}
+
+func (nftAction *NFTables) validateOwnedTable(ctx context.Context, remove bool) (bool, error) {
+	if nftAction == nil {
+		return false, fmt.Errorf("nftables action is not configured")
+	}
+	binary := nftAction.Binary
+	if binary == "" {
+		binary = "nft"
+	}
+	run := nftAction.run
+	if run == nil {
+		run = runNFTCommand
+	}
+	command := func(args ...string) ([]byte, error) { return run(ctx, binary, args...) }
+	table, err := command("list", "table", NftFamily, NftTable)
+	if err != nil {
+		if isMissingNFTObject(table) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect nftables table %s %s: %w: %s", NftFamily, NftTable, err, strings.TrimSpace(string(table)))
+	}
+	if !strings.Contains(string(table), `comment "`+nftTableComment+`"`) {
+		return false, fmt.Errorf("nftables table %s %s is not marked as AntiDDoS-owned", NftFamily, NftTable)
+	}
+	wantObjects := map[string]bool{"set:" + NftIPv4Set: false, "set:" + NftIPv6Set: false, "chain:input": false, "chain:forward": false}
+	for _, match := range nftObjectDeclaration.FindAllStringSubmatch(string(table), -1) {
+		key := match[1] + ":" + match[2]
+		if _, ok := wantObjects[key]; !ok {
+			return false, fmt.Errorf("AntiDDoS nftables table contains unexpected %s %q", match[1], match[2])
+		}
+		wantObjects[key] = true
+	}
+	for object, found := range wantObjects {
+		if !found {
+			return false, fmt.Errorf("AntiDDoS nftables table is missing %s", strings.Replace(object, ":", " ", 1))
+		}
+	}
+	for _, set := range []struct{ name, addressType string }{{NftIPv4Set, "ipv4_addr"}, {NftIPv6Set, "ipv6_addr"}} {
+		data, inspectErr := command("list", "set", NftFamily, NftTable, set.name)
+		if inspectErr != nil {
+			return false, fmt.Errorf("inspect nftables set %s: %w: %s", set.name, inspectErr, strings.TrimSpace(string(data)))
+		}
+		text := string(data)
+		if !strings.Contains(text, "type "+set.addressType) || !strings.Contains(text, "flags timeout") || !strings.Contains(text, fmt.Sprintf("size %d", NftSetMaxSize)) {
+			return false, fmt.Errorf("nftables set %s has incompatible type, flags, or size limit", set.name)
+		}
+	}
+	for _, chain := range []struct{ name, hook string }{{"input", "input"}, {"forward", "forward"}} {
+		data, inspectErr := command("-a", "list", "chain", NftFamily, NftTable, chain.name)
+		if inspectErr != nil {
+			return false, fmt.Errorf("inspect nftables chain %s: %w: %s", chain.name, inspectErr, strings.TrimSpace(string(data)))
+		}
+		text := string(data)
+		if !strings.Contains(text, "type filter") || !strings.Contains(text, "hook "+chain.hook) || !strings.Contains(text, "policy accept") {
+			return false, fmt.Errorf("nftables chain %s has incompatible type, hook, or policy", chain.name)
+		}
+		rules := 0
+		for _, line := range strings.Split(text, "\n") {
+			body, _, ok := nftRuleLine(line)
+			if !ok {
+				continue
+			}
+			rules++
+			managedPrefix := `comment "` + nftRuleComment + `:` + chain.name + `:`
+			legacy := body == nftRuleExpression("ip", NftIPv4Set, "", "") || body == nftRuleExpression("ip6", NftIPv6Set, "", "")
+			if !legacy && !strings.Contains(body, managedPrefix) {
+				return false, fmt.Errorf("nftables chain %s contains an unmanaged rule", chain.name)
+			}
+		}
+		if rules != 2 {
+			return false, fmt.Errorf("nftables chain %s contains %d rules, expected 2 managed rules", chain.name, rules)
+		}
+	}
+	if !remove {
+		return true, nil
+	}
+	output, err := command("delete", "table", NftFamily, NftTable)
+	if err != nil {
+		return false, fmt.Errorf("delete AntiDDoS nftables table: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return true, nil
+}
+
 func (nftAction *NFTables) ensureSet(command func(...string) ([]byte, error), name, addressType string) error {
 	output, err := command("list", "set", NftFamily, NftTable, name)
 	if err == nil {
@@ -311,11 +408,18 @@ func nftRuleLine(line string) (body string, handle int, ok bool) {
 	if index < 0 {
 		return "", 0, false
 	}
+	body = strings.TrimSpace(line[:index])
+	// `nft -a list chain` annotates the chain declaration itself with a
+	// handle. It is metadata, not a rule, and must not participate in the
+	// managed-rule count or ownership checks.
+	if strings.HasPrefix(body, "chain ") && strings.HasSuffix(body, "{") {
+		return "", 0, false
+	}
 	handle, err := strconv.Atoi(strings.TrimSpace(line[index+len(handleMarker):]))
 	if err != nil {
 		return "", 0, false
 	}
-	return strings.TrimSpace(line[:index]), handle, true
+	return body, handle, true
 }
 
 func isMissingNFTObject(output []byte) bool {

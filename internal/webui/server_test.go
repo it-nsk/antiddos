@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/it-nsk/antiddos/internal/challengeadmin"
 	"github.com/it-nsk/antiddos/internal/configservice"
 	"github.com/it-nsk/antiddos/internal/storage"
 	"github.com/it-nsk/antiddos/internal/webauth"
@@ -30,6 +31,54 @@ func configserviceStringSlice(values ...string) *[]string { return &values }
 
 func (b *testBackend) Dashboard(ctx context.Context, from, to time.Time, before int64, limit int) (storage.Dashboard, error) {
 	return b.stats.Dashboard(ctx, from, to, before, limit)
+}
+func (b *testBackend) ChallengeStatus(context.Context) (challengeadmin.Status, error) {
+	return challengeadmin.Status{Health: "ready", MetricsHealth: "ready"}, nil
+}
+func (b *testBackend) SoftBlocks(ctx context.Context, limit int) ([]storage.SoftBlockLease, error) {
+	return b.stats.ActiveSoftBlocks(ctx, time.Now(), limit)
+}
+func (b *testBackend) ChallengeMetrics(context.Context, time.Time, time.Time, int) ([]challengeadmin.Metric, error) {
+	return []challengeadmin.Metric{{Site: "main", Reason: "issued", Count: 3}}, nil
+}
+
+func TestChallengeAPIRequiresSessionAndAllowsViewer(t *testing.T) {
+	s := fixtureServer(t)
+	if w := request(s, "GET", "/api/challenge/metrics", "", nil, "", ""); w.Code != 401 {
+		t.Fatalf("anonymous status %d", w.Code)
+	}
+	viewer, _ := loginAs(t, s, "viewer")
+	for _, path := range []string{"/api/challenge/status", "/api/challenge/metrics", "/api/soft-blocks"} {
+		w := request(s, "GET", path, "", viewer, "", "")
+		if w.Code != 200 {
+			t.Fatalf("%s status=%d body=%s", path, w.Code, w.Body.String())
+		}
+	}
+	if w := request(s, "GET", "/api/challenge/metrics?from=0&to=9999999&limit=1001", "", viewer, "", ""); w.Code != 400 {
+		t.Fatalf("invalid query status=%d", w.Code)
+	}
+}
+
+func TestSoftBlockCookieTTLAdminOnly(t *testing.T) {
+	s := fixtureServer(t)
+	backend := s.backend.(*testBackend)
+	data := `{"log_sources":{"web":{"path":"/tmp/web.log","format":"nginx_custom","log_format":"$remote_addr [$time_local] \"$request\" $status $antiddos_response_origin"}},"database_path":"/tmp/stats.sqlite","block_mode":"soft_block","soft_block":{"cookie_ttl":"30m","sites":{"main":{"hosts":["example.test"],"log_sources":["web"]}}},"engine":{"rules":[{"id":"home","log_source":"web","path_regex":"^/$","window":"5s","threshold":5,"group_by":"ip"}]}}`
+	if err := os.WriteFile(backend.config.Path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := backend.config.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	update, _ := json.Marshal(map[string]any{"revision": doc.Revision, "cookie_ttl": "45m"})
+	viewer, viewerSession := loginAs(t, s, "viewer")
+	if w := request(s, "PUT", "/api/config/rules", string(update), viewer, viewerSession.CSRF, s.origin.String()); w.Code != 403 {
+		t.Fatalf("viewer status=%d", w.Code)
+	}
+	admin, adminSession := loginAs(t, s, "admin")
+	if w := request(s, "PUT", "/api/config/rules", string(update), admin, adminSession.CSRF, s.origin.String()); w.Code != 200 || !strings.Contains(w.Body.String(), `"cookie_ttl":"45m"`) {
+		t.Fatalf("admin status=%d body=%s", w.Code, w.Body.String())
+	}
 }
 func (b *testBackend) Config(context.Context) (webcontrol.ConfigState, error) {
 	document, err := b.config.Read()

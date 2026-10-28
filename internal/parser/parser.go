@@ -15,6 +15,9 @@ import (
 const (
 	FormatNginxCombined = "nginx_combined"
 	FormatNginxCustom   = "nginx_custom"
+	FormatNginxError    = "nginx_error"
+	FormatSyslogSSHD    = "syslog_sshd"
+	FormatNetfilterLog  = "netfilter_log"
 )
 
 // Parser converts one source line into one normalized HTTP request event.
@@ -30,23 +33,68 @@ func (nginxCombinedParser) Parse(line string) (request.Event, error) { return Pa
 // New constructs a parser for one log source. logFormat may be the complete
 // Nginx log_format directive or its quoted format string(s).
 func New(format, logFormat string) (Parser, error) {
+	return NewWithOriginRequirement(format, logFormat, false)
+}
+
+// NewWithOriginRequirement additionally validates the response-origin field
+// on each parsed line when the source participates in soft-block mode.
+func NewWithOriginRequirement(format, logFormat string, required bool) (Parser, error) {
 	switch format {
+	case FormatNginxError:
+		if logFormat != "" {
+			return nil, fmt.Errorf("log_format is not valid for %s", FormatNginxError)
+		}
+		if required {
+			return nil, fmt.Errorf("soft-block sources require an HTTP access log")
+		}
+		return nginxErrorParser{}, nil
+	case FormatSyslogSSHD:
+		if logFormat != "" {
+			return nil, fmt.Errorf("log_format is not valid for %s", FormatSyslogSSHD)
+		}
+		if required {
+			return nil, fmt.Errorf("soft-block sources require an HTTP access log")
+		}
+		return syslogSSHDParser{}, nil
+	case FormatNetfilterLog:
+		if logFormat != "" {
+			return nil, fmt.Errorf("log_format is not valid for %s", FormatNetfilterLog)
+		}
+		if required {
+			return nil, fmt.Errorf("soft-block sources require an HTTP access log")
+		}
+		return netfilterLogParser{}, nil
 	case "", FormatNginxCombined:
 		if logFormat != "" {
 			return nil, fmt.Errorf("log_format is only valid for %s", FormatNginxCustom)
 		}
+		if required {
+			return nil, fmt.Errorf("soft-block sources require nginx_custom with $antiddos_response_origin")
+		}
 		return nginxCombinedParser{}, nil
 	case FormatNginxCustom:
-		return newCustomNginxParser(logFormat)
+		compiled, err := newCustomNginxParser(logFormat)
+		if err != nil {
+			return nil, err
+		}
+		custom := compiled.(*customNginxParser)
+		if required {
+			if _, ok := custom.fields["response_origin"]; !ok {
+				return nil, fmt.Errorf("soft-block log_format must include $antiddos_response_origin")
+			}
+			custom.requireOrigin = true
+		}
+		return custom, nil
 	default:
 		return nil, fmt.Errorf("unsupported log format %q", format)
 	}
 }
 
 type customNginxParser struct {
-	linePattern *regexp.Regexp
-	fields      map[string]string // normalized event field -> Nginx variable
-	fieldGroups map[string]int    // normalized event field -> regexp subexpression
+	linePattern   *regexp.Regexp
+	fields        map[string]string // normalized event field -> Nginx variable
+	fieldGroups   map[string]int    // normalized event field -> regexp subexpression
+	requireOrigin bool
 }
 
 func newCustomNginxParser(directive string) (Parser, error) {
@@ -139,7 +187,14 @@ func (parser *customNginxParser) Parse(line string) (request.Event, error) {
 			values[field] = match[group]
 		}
 	}
-	return eventFromFields(values)
+	event, err := eventFromFields(values)
+	if err != nil {
+		return request.Event{}, err
+	}
+	if parser.requireOrigin && event.ResponseOrigin != "application" && event.ResponseOrigin != "challenge" && event.ResponseOrigin != "service" {
+		return request.Event{}, fmt.Errorf("invalid or missing $antiddos_response_origin %q", event.ResponseOrigin)
+	}
+	return event, nil
 }
 
 func eventFromFields(values map[string]string) (request.Event, error) {
@@ -190,7 +245,8 @@ func eventFromFields(values map[string]string) (request.Event, error) {
 		Timestamp: timestamp, IP: address, Method: method, Path: requestURL.EscapedPath(),
 		RawQuery: requestURL.RawQuery, Query: requestURL.Query(), Protocol: protocol,
 		Status: status, ResponseBytes: responseBytes,
-		UserAgent: unescapeNginx(values["http_user_agent"]),
+		ResponseOrigin: values["response_origin"],
+		UserAgent:      unescapeNginx(values["http_user_agent"]),
 	}, nil
 }
 
@@ -220,6 +276,8 @@ func normalizedField(variable string) string {
 		return "bytes_sent"
 	case "http_user_agent":
 		return "http_user_agent"
+	case "antiddos_response_origin":
+		return "response_origin"
 	default:
 		return ""
 	}

@@ -13,7 +13,7 @@ Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=10s
 NoNewPrivileges=true
-# nftables mode needs host firewall access; launch drops it in dry_run mode.
+# Effective nftables rules need host firewall access; launch otherwise drops it.
 # CAP_NET_ADMIN is broad network administration access, not set-specific.
 CapabilityBoundingSet=CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_ADMIN

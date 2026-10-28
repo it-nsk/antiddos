@@ -10,7 +10,9 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -20,9 +22,12 @@ import (
 	"github.com/it-nsk/antiddos/internal/action"
 	"github.com/it-nsk/antiddos/internal/app"
 	"github.com/it-nsk/antiddos/internal/blockpolicy"
+	challengeService "github.com/it-nsk/antiddos/internal/challenge"
+	"github.com/it-nsk/antiddos/internal/challengeadmin"
 	"github.com/it-nsk/antiddos/internal/config"
 	"github.com/it-nsk/antiddos/internal/control"
 	"github.com/it-nsk/antiddos/internal/metrics"
+	"github.com/it-nsk/antiddos/internal/softfeed"
 	"github.com/it-nsk/antiddos/internal/storage"
 	"github.com/it-nsk/antiddos/internal/webcontrol"
 )
@@ -31,6 +36,10 @@ const usage = `Usage:
   antiddos run [OPTIONS]       run the analyzer directly
   antiddos monitor [OPTIONS]   show traffic, detections, and active blocks
   antiddos web [OPTIONS]       serve the local web interface
+  antiddos challenge [OPTIONS] run the isolated soft-block checker
+  antiddos challenge-keys rotate [OPTIONS] rotate checker signing keys
+  antiddos nginx-snippet [OPTIONS] preview Nginx soft-block include files
+  antiddos soft-block COMMAND manage soft-block prerequisites and rollback config
   antiddos user COMMAND        manage web users (add/list/password/delete)
   antiddos unblock IP          remove one IP from the firewall block set
 
@@ -62,6 +71,14 @@ func executeCommand(ctx context.Context, args []string, logger *slog.Logger, out
 		err = monitor(ctx, args[1:], out)
 	case "web":
 		err = webCommand(ctx, args[1:], logger, out)
+	case "challenge":
+		err = challengeCommand(ctx, args[1:], logger, out)
+	case "challenge-keys":
+		err = challengeKeysCommand(args[1:], out, time.Now())
+	case "nginx-snippet":
+		err = nginxSnippetCommand(args[1:], out)
+	case "soft-block":
+		err = softBlockCommand(ctx, args[1:], out)
 	case "user":
 		err = userCommand(ctx, args[1:], out)
 	case "unblock":
@@ -75,9 +92,9 @@ func executeCommand(ctx context.Context, args []string, logger *slog.Logger, out
 	return err
 }
 
-// launch is the systemd entry point. It drops CAP_NET_ADMIN before starting
-// the ordinary daemon in dry-run mode and initializes only our nftables objects
-// when enforcement is explicitly enabled.
+// launch is the systemd entry point. It retains CAP_NET_ADMIN only when an
+// effective rule action uses nftables. Before dropping the capability it
+// removes leases left by a previously enabled firewall configuration.
 func launch(ctx context.Context, args []string, logger *slog.Logger) error {
 	options, err := parseRunFlags(args, os.Stderr)
 	if err != nil {
@@ -90,7 +107,10 @@ func launch(ctx context.Context, args []string, logger *slog.Logger) error {
 	if _, err := blockpolicy.New(cfg.BlockDuration); err != nil {
 		return fmt.Errorf("validate block policy: %w", err)
 	}
-	if cfg.BlockMode == config.BlockModeDryRun {
+	if !config.UsesNFTables(cfg) {
+		if err := app.ReconcileDisabledNFTables(ctx, cfg, &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}, logger); err != nil {
+			return err
+		}
 		setpriv, err := exec.LookPath("setpriv")
 		if err != nil {
 			return fmt.Errorf("dry-run startup requires util-linux setpriv to drop CAP_NET_ADMIN: %w", err)
@@ -141,14 +161,73 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	var softFeedGroupID *int
+	if options.SoftFeedGroup != "" {
+		group, err := user.LookupGroup(options.SoftFeedGroup)
+		if err != nil {
+			return fmt.Errorf("lookup soft feed socket group %q: %w", options.SoftFeedGroup, err)
+		}
+		groupID, err := strconv.Atoi(group.Gid)
+		if err != nil {
+			return fmt.Errorf("parse soft feed socket group GID: %w", err)
+		}
+		softFeedGroupID = &groupID
+	}
 	return app.Run(ctx, app.RunOptions{
 		Config: options.Config, LogFile: options.LogFile, ControlSocketPath: options.ControlSocket, WebSocketPath: options.WebSocket,
 		FromStart: options.FromStart, PrintLines: options.PrintLines, PrintEvents: options.PrintEvents,
+		SoftFeedSocketPath: options.SoftFeedSocket, SoftFeedSocketGroupID: softFeedGroupID,
 	}, logger)
+}
+
+func challengeCommand(ctx context.Context, args []string, logger *slog.Logger, out io.Writer) error {
+	credentialPath := ""
+	if directory := os.Getenv("CREDENTIALS_DIRECTORY"); directory != "" {
+		credentialPath = filepath.Join(directory, challengeService.DefaultCredentialName)
+	}
+	feedSocket := softfeed.DefaultSocketPath
+	checkSocket := challengeService.DefaultCheckSocketPath
+	adminSocket := challengeService.DefaultAdminSocketPath
+	metricsPath := challengeService.DefaultMetricsPath
+	checkGroup := "antiddos-check"
+	adminGroup := "antiddos-challenge-read"
+	f := flag.NewFlagSet("challenge", flag.ContinueOnError)
+	f.SetOutput(out)
+	f.StringVar(&credentialPath, "credential-file", credentialPath, "systemd LoadCredential file containing provider and cookie keys")
+	f.StringVar(&feedSocket, "feed-socket", feedSocket, "daemon read-only feed Unix socket")
+	f.StringVar(&checkSocket, "check-socket", checkSocket, "public Nginx check/challenge Unix socket")
+	f.StringVar(&checkGroup, "check-group", checkGroup, "group allowed to connect to the public check socket")
+	f.StringVar(&adminSocket, "admin-socket", adminSocket, "read-only checker status and metrics Unix socket")
+	f.StringVar(&metricsPath, "metrics-db", metricsPath, "checker aggregate metrics SQLite path")
+	f.StringVar(&adminGroup, "admin-group", adminGroup, "group allowed to connect to the read-only admin socket")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if f.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %v", f.Args())
+	}
+	group, err := user.LookupGroup(checkGroup)
+	if err != nil {
+		return fmt.Errorf("lookup check socket group %q: %w", checkGroup, err)
+	}
+	groupID, err := strconv.Atoi(group.Gid)
+	if err != nil {
+		return fmt.Errorf("parse check socket group GID: %w", err)
+	}
+	admin, err := user.LookupGroup(adminGroup)
+	if err != nil {
+		return fmt.Errorf("lookup admin socket group %q: %w", adminGroup, err)
+	}
+	adminGroupID, err := strconv.Atoi(admin.Gid)
+	if err != nil {
+		return fmt.Errorf("parse admin socket group GID: %w", err)
+	}
+	return challengeService.Run(ctx, challengeService.RuntimeOptions{FeedSocketPath: feedSocket, CheckSocketPath: checkSocket, AdminSocketPath: adminSocket, CredentialPath: credentialPath, MetricsPath: metricsPath, CheckSocketGroupID: groupID, AdminSocketGroupID: adminGroupID}, logger)
 }
 
 type runOptions struct {
 	Config, LogFile, ControlSocket, WebSocket string
+	SoftFeedSocket, SoftFeedGroup             string
 	FromStart, PrintLines, PrintEvents        bool
 }
 
@@ -161,6 +240,8 @@ func parseRunFlags(args []string, out io.Writer) (runOptions, error) {
 	f.SetOutput(out)
 	f.StringVar(&o.ControlSocket, "control-socket", "", "optional local control socket")
 	f.StringVar(&o.WebSocket, "web-socket", "", "optional restricted web API socket")
+	f.StringVar(&o.SoftFeedSocket, "soft-feed-socket", "", "override soft-block feed Unix socket (test isolation)")
+	f.StringVar(&o.SoftFeedGroup, "soft-feed-group", "", "override soft-block feed socket group (test isolation)")
 	f.StringVar(&o.Config, "config", o.Config, "configuration file")
 	f.StringVar(&o.LogFile, "log-file", o.LogFile, "override log_file")
 	f.BoolVar(&o.FromStart, "from-start", false, "read the existing log from the beginning")
@@ -176,18 +257,21 @@ func parseRunFlags(args []string, out io.Writer) (runOptions, error) {
 }
 
 type monitorOptions struct {
-	Config string
-	Once   bool
-	Limit  int
+	Config               string
+	ChallengeAdminSocket string
+	Once                 bool
+	Limit                int
 }
 
 func monitor(ctx context.Context, args []string, out io.Writer) error {
 	o := monitorOptions{
-		Config: configPath(),
+		Config:               configPath(),
+		ChallengeAdminSocket: challengeadmin.DefaultSocketPath,
 	}
 	f := flag.NewFlagSet("monitor", flag.ContinueOnError)
 	f.SetOutput(out)
 	f.StringVar(&o.Config, "config", o.Config, "configuration file")
+	f.StringVar(&o.ChallengeAdminSocket, "challenge-admin-socket", o.ChallengeAdminSocket, "read-only challenge status Unix socket")
 	f.BoolVar(&o.Once, "once", false, "print one snapshot and exit")
 	f.IntVar(&o.Limit, "limit", 20, "number of traffic intervals, detections, and active blocks to show (1-1000)")
 	if err := f.Parse(args); err != nil {
@@ -236,7 +320,35 @@ func monitor(ctx context.Context, args []string, out io.Writer) error {
 				fmt.Fprintf(out, "  %s: %s\n", source.ID, source.Path)
 			}
 		}
-		fmt.Fprintf(out, "Database: %s\nUpdated: %s\n\nTRAFFIC (latest %d intervals)\n", path, now.Format(time.RFC3339), o.Limit)
+		fmt.Fprintf(out, "Database: %s\nUpdated: %s\nMode: %s\n", path, now.Format(time.RFC3339), cfg.BlockMode)
+		if config.UsesSoftBlock(cfg) {
+			checker := &challengeadmin.Client{SocketPath: o.ChallengeAdminSocket}
+			status, statusErr := checker.Status(ctx)
+			if statusErr != nil {
+				fmt.Fprintln(out, "Challenge: unavailable (main dashboard remains available)")
+				fmt.Fprintln(out, "Checker outages: exact fail-open count is unknown.")
+			} else {
+				fmt.Fprintf(out, "Challenge: %s (running mode=%s revision=%s sites=%d)\n", status.Health, status.Mode, safeText(status.ConfigRevision), status.Sites)
+				fmt.Fprintf(out, "Metrics: %s (dropped=%d; newest bucket may not be flushed)\n", defaultMetricHealth(status.MetricsHealth), status.MetricsDropped)
+				fmt.Fprintf(out, "\nCHALLENGE METRICS (last 15 minutes, up to %d buckets)\n", o.Limit)
+				rows, metricsErr := checker.Metrics(ctx, now.Add(-15*time.Minute), now, o.Limit)
+				if metricsErr != nil {
+					fmt.Fprintln(out, "(metrics unavailable)")
+				} else if len(rows) == 0 {
+					fmt.Fprintln(out, "(no flushed metrics)")
+				} else {
+					fmt.Fprintln(out, "BUCKET  SITE  REASON  COUNT")
+					for _, row := range rows {
+						fmt.Fprintf(out, "%s  %s  %s  %d\n", time.Unix(row.Bucket, 0).Format(time.RFC3339), row.Site, row.Reason, row.Count)
+					}
+					if len(rows) == o.Limit {
+						fmt.Fprintln(out, "(result may be truncated)")
+					}
+				}
+				fmt.Fprintln(out, "Checker outages: exact fail-open count is unknown.")
+			}
+		}
+		fmt.Fprintf(out, "\nTRAFFIC (latest %d intervals)\n", o.Limit)
 		if err := printTraffic(out, traffic); err != nil {
 			return err
 		}
@@ -263,6 +375,13 @@ func monitor(ctx context.Context, args []string, out io.Writer) error {
 			}
 		}
 	}
+}
+
+func defaultMetricHealth(value string) string {
+	if value == "" {
+		return "unavailable"
+	}
+	return value
 }
 
 func printBlocks(out io.Writer, rows []storage.BlockRow, now time.Time) error {

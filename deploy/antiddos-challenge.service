@@ -1,0 +1,39 @@
+[Unit]
+Description=AntiDDoS soft-block challenge checker
+After=antiddos.service
+Wants=antiddos.service
+
+[Service]
+Type=simple
+User=antiddos-challenge
+Group=antiddos-check
+SupplementaryGroups=antiddos-soft-feed antiddos-challenge-read
+LoadCredential=keys.json:/etc/antiddos-challenge/keys.json
+ExecStart=/usr/local/bin/antiddos challenge
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true
+TasksMax=320
+MemoryMax=256M
+RuntimeDirectory=antiddos-challenge-check antiddos-challenge-admin
+RuntimeDirectoryMode=0750
+StateDirectory=antiddos-challenge
+StateDirectoryMode=0700
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target

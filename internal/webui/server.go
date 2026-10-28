@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/it-nsk/antiddos/internal/challengeadmin"
 	"github.com/it-nsk/antiddos/internal/configservice"
 	"github.com/it-nsk/antiddos/internal/storage"
 	"github.com/it-nsk/antiddos/internal/webauth"
@@ -36,6 +37,9 @@ type Backend interface {
 	Dashboard(context.Context, time.Time, time.Time, int64, int) (storage.Dashboard, error)
 	Config(context.Context) (webcontrol.ConfigState, error)
 	SaveRules(context.Context, configservice.Update) (webcontrol.ConfigState, error)
+	ChallengeStatus(context.Context) (challengeadmin.Status, error)
+	ChallengeMetrics(context.Context, time.Time, time.Time, int) ([]challengeadmin.Metric, error)
+	SoftBlocks(context.Context, int) ([]storage.SoftBlockLease, error)
 }
 
 type Server struct {
@@ -83,6 +87,9 @@ func New(o Options, auth *webauth.Store, backend Backend, logger *slog.Logger) (
 	mux.HandleFunc("GET /api/session", s.protected(false, func(w http.ResponseWriter, r *http.Request, v webauth.Session) { writeJSON(w, 200, v) }))
 	mux.HandleFunc("POST /api/logout", s.protected(false, s.logout))
 	mux.HandleFunc("GET /api/dashboard", s.protected(false, s.dashboard))
+	mux.HandleFunc("GET /api/challenge/status", s.protected(false, s.challengeStatus))
+	mux.HandleFunc("GET /api/challenge/metrics", s.protected(false, s.challengeMetrics))
+	mux.HandleFunc("GET /api/soft-blocks", s.protected(false, s.softBlocks))
 	mux.HandleFunc("GET /api/config", s.protected(false, s.getConfig))
 	mux.HandleFunc("PUT /api/config/rules", s.protected(true, s.saveConfig))
 	mux.HandleFunc("GET /api/users", s.protected(true, s.users))
@@ -285,6 +292,73 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, v webauth.Ses
 		return
 	}
 	writeJSON(w, 200, data)
+}
+func (s *Server) softBlocks(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
+	if r.URL.RawQuery != "" {
+		fail(w, 400, "Invalid query")
+		return
+	}
+	rows, err := s.backend.SoftBlocks(r.Context(), 1000)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, 200, rows)
+}
+
+func (s *Server) challengeStatus(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
+	if r.URL.RawQuery != "" {
+		fail(w, 400, "Invalid query")
+		return
+	}
+	status, err := s.backend.ChallengeStatus(r.Context())
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, 200, status)
+}
+
+func (s *Server) challengeMetrics(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
+	now := time.Now().Unix()
+	from, to, limit := now-3600, now, 1000
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		fail(w, 400, "Invalid query")
+		return
+	}
+	for key, values := range q {
+		if len(values) != 1 {
+			fail(w, 400, "Invalid query")
+			return
+		}
+		switch key {
+		case "from":
+			from, err = strconv.ParseInt(values[0], 10, 64)
+		case "to":
+			to, err = strconv.ParseInt(values[0], 10, 64)
+		case "limit":
+			limit, err = strconv.Atoi(values[0])
+		default:
+			fail(w, 400, "Invalid query")
+			return
+		}
+		if err != nil {
+			fail(w, 400, "Invalid query")
+			return
+		}
+	}
+	start, end := time.Unix(from, 0), time.Unix(to, 0)
+	if from < 0 || !end.After(start) || end.Sub(start) > 7*24*time.Hour || to > now+60 || limit < 1 || limit > 1000 {
+		fail(w, 400, "Invalid metrics range or limit")
+		return
+	}
+	rows, err := s.backend.ChallengeMetrics(r.Context(), start, end, limit)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, 200, rows)
 }
 func (s *Server) getConfig(w http.ResponseWriter, r *http.Request, v webauth.Session) {
 	state, err := s.backend.Config(r.Context())

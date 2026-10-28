@@ -5,7 +5,7 @@ import path from 'node:path';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
 const port=process.env.ANTIDDOS_E2E_PORT||'18082';
 const dir=mkdtempSync('/tmp/antiddos-web-e2e-');
-const artifact=path.join(root,'runtime/web-e2e');mkdirSync(artifact,{recursive:true});
+const artifact=process.env.ANTIDDOS_E2E_ARTIFACT||path.join(root,'runtime/web-e2e');mkdirSync(artifact,{recursive:true});
 const bin=path.join(dir,'antiddos');
 execFileSync('go',['build','-o',bin,'./cmd/antiddos'],{cwd:root,stdio:'inherit'});
 const config=path.join(dir,'config.json'),users=path.join(dir,'users.sqlite'),socket=path.join(dir,'control.sock');
@@ -56,7 +56,7 @@ process.on('unhandledRejection',error=>{console.error(error);void stop(1)});
 async function waitFor(check){for(let i=0;i<300;i++){if(stopping)return;if(check())return;await new Promise(r=>setTimeout(r,100))}throw Error('fixture timeout')}
 async function main(){
  startDaemon(true);
- await waitFor(()=>existsSync(socket));await new Promise(r=>setTimeout(r,55000));
+ await waitFor(()=>existsSync(socket));await new Promise(r=>setTimeout(r,Number(process.env.ANTIDDOS_E2E_SEED_WAIT_MS??55000)));
  if(stopping)return;
  web=launch(['web','--users-db',users,'--daemon-socket',socket,'--listen',`127.0.0.1:${port}`,'--origin',`http://127.0.0.1:${port}`]);saveFixture();
 }

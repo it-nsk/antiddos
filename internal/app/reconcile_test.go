@@ -10,6 +10,7 @@ import (
 	"github.com/it-nsk/antiddos/internal/action"
 	"github.com/it-nsk/antiddos/internal/blockmanager"
 	"github.com/it-nsk/antiddos/internal/blockpolicy"
+	"github.com/it-nsk/antiddos/internal/config"
 	"github.com/it-nsk/antiddos/internal/engine"
 	"github.com/it-nsk/antiddos/internal/request"
 	"github.com/it-nsk/antiddos/internal/storage"
@@ -89,5 +90,38 @@ func TestReconcileRestoresRemainingLeaseAndRemovesWhitelistedIPs(t *testing.T) {
 	}
 	if ruleEngine.IsIgnored(request.Event{IP: ignoredIPs[0]}) != true {
 		t.Fatal("CIDR whitelist did not match lease IP")
+	}
+}
+
+func TestReconcileDisabledNFTablesRemovesPersistedLeases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	store, err := storage.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	ip := netip.MustParseAddr("192.0.2.44")
+	if err := store.RecordBlock(context.Background(), ip, "old-firewall", now, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recorder := &recordingAction{removeStatus: action.StatusRemoved}
+	cfg := config.Config{DatabasePath: path, BlockDuration: time.Minute, BlockMode: config.BlockModeHybrid, Engine: config.EngineConfig{Rules: []config.RuleConfig{{ID: "observe", Action: config.RuleActionDryRun}}}}
+	if err := ReconcileDisabledNFTables(context.Background(), cfg, recorder, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.removedIPs) != 1 || recorder.removedIPs[0] != ip {
+		t.Fatalf("removed IPs = %v, want %s", recorder.removedIPs, ip)
+	}
+	reader, err := storage.OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	blocks, err := reader.ActiveBlocks(context.Background(), now, 10)
+	if err != nil || len(blocks) != 0 {
+		t.Fatalf("remaining blocks = %+v, %v", blocks, err)
 	}
 }

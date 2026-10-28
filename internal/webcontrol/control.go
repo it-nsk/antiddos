@@ -11,10 +11,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
 
+	"github.com/it-nsk/antiddos/internal/challengeadmin"
 	"github.com/it-nsk/antiddos/internal/configservice"
 	"github.com/it-nsk/antiddos/internal/storage"
 )
@@ -35,9 +37,10 @@ type ConfigState struct {
 }
 
 type Service struct {
-	Config *configservice.Service
-	Stats  *storage.Reader
-	Status Status
+	Config    *configservice.Service
+	Stats     *storage.Reader
+	Status    Status
+	Challenge *challengeadmin.Client
 }
 
 func (s *Service) state() (ConfigState, error) {
@@ -51,6 +54,65 @@ func (s *Service) state() (ConfigState, error) {
 
 func (s *Service) handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/soft-blocks", func(w http.ResponseWriter, r *http.Request) {
+		q, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil || len(q) != 1 || len(q["limit"]) != 1 {
+			writeError(w, 400, fmt.Errorf("invalid soft-block query"))
+			return
+		}
+		limit, err := strconv.Atoi(q.Get("limit"))
+		if err != nil || limit < 1 || limit > 1000 {
+			writeError(w, 400, fmt.Errorf("invalid soft-block limit"))
+			return
+		}
+		rows, err := s.Stats.ActiveSoftBlocks(r.Context(), time.Now(), limit)
+		if err != nil {
+			writeError(w, 503, fmt.Errorf("soft-block decisions unavailable"))
+			return
+		}
+		writeJSON(w, 200, rows)
+	})
+	mux.HandleFunc("GET /v1/challenge/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" {
+			writeError(w, 400, fmt.Errorf("invalid query"))
+			return
+		}
+		if s.Challenge == nil {
+			writeError(w, 503, fmt.Errorf("challenge unavailable"))
+			return
+		}
+		status, err := s.Challenge.Status(r.Context())
+		if err != nil {
+			writeError(w, 503, fmt.Errorf("challenge unavailable"))
+			return
+		}
+		writeJSON(w, 200, status)
+	})
+	mux.HandleFunc("GET /v1/challenge/metrics", func(w http.ResponseWriter, r *http.Request) {
+		query, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil || len(query) != 3 || len(query["from"]) != 1 || len(query["to"]) != 1 || len(query["limit"]) != 1 {
+			writeError(w, 400, fmt.Errorf("invalid metrics query"))
+			return
+		}
+		from, e1 := strconv.ParseInt(query.Get("from"), 10, 64)
+		to, e2 := strconv.ParseInt(query.Get("to"), 10, 64)
+		limit, e3 := strconv.Atoi(query.Get("limit"))
+		start, end := time.Unix(from, 0), time.Unix(to, 0)
+		if e1 != nil || e2 != nil || e3 != nil || !end.After(start) || end.Sub(start) > 7*24*time.Hour || limit < 1 || limit > 1000 {
+			writeError(w, 400, fmt.Errorf("invalid metrics range or limit"))
+			return
+		}
+		if s.Challenge == nil {
+			writeError(w, 503, fmt.Errorf("challenge unavailable"))
+			return
+		}
+		rows, err := s.Challenge.Metrics(r.Context(), start, end, limit)
+		if err != nil {
+			writeError(w, 503, fmt.Errorf("challenge metrics unavailable"))
+			return
+		}
+		writeJSON(w, 200, rows)
+	})
 	mux.HandleFunc("GET /v1/config", func(w http.ResponseWriter, r *http.Request) {
 		state, err := s.state()
 		if err != nil {
@@ -222,6 +284,25 @@ func (c *Client) Dashboard(ctx context.Context, from, to time.Time, before int64
 func (c *Client) Config(ctx context.Context) (ConfigState, error) {
 	var result ConfigState
 	err := c.request(ctx, http.MethodGet, "/v1/config", nil, &result)
+	return result, err
+}
+
+func (c *Client) ChallengeStatus(ctx context.Context) (challengeadmin.Status, error) {
+	var result challengeadmin.Status
+	err := c.request(ctx, http.MethodGet, "/v1/challenge/status", nil, &result)
+	return result, err
+}
+
+func (c *Client) SoftBlocks(ctx context.Context, limit int) ([]storage.SoftBlockLease, error) {
+	var result []storage.SoftBlockLease
+	err := c.request(ctx, http.MethodGet, fmt.Sprintf("/v1/soft-blocks?limit=%d", limit), nil, &result)
+	return result, err
+}
+
+func (c *Client) ChallengeMetrics(ctx context.Context, from, to time.Time, limit int) ([]challengeadmin.Metric, error) {
+	path := fmt.Sprintf("/v1/challenge/metrics?from=%d&to=%d&limit=%d", from.Unix(), to.Unix(), limit)
+	var result []challengeadmin.Metric
+	err := c.request(ctx, http.MethodGet, path, nil, &result)
 	return result, err
 }
 

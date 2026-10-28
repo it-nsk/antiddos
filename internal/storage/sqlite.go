@@ -106,6 +106,9 @@ func (store *Store) createSchema(ctx context.Context) error {
 		group_values_json TEXT NOT NULL,
 		trigger_ip TEXT NOT NULL,
 		trigger_user_agent TEXT NOT NULL,
+		method TEXT NOT NULL DEFAULT '',
+		path TEXT NOT NULL DEFAULT '',
+		status INTEGER NOT NULL DEFAULT 0,
 		request_count INTEGER NOT NULL CHECK (request_count > 0),
 			window_millis INTEGER NOT NULL CHECK (window_millis > 0),
 			threshold INTEGER NOT NULL CHECK (threshold > 0),
@@ -117,6 +120,32 @@ func (store *Store) createSchema(ctx context.Context) error {
 			started_at_unix_ms INTEGER NOT NULL,
 			expires_at_unix_ms INTEGER NOT NULL CHECK (expires_at_unix_ms > started_at_unix_ms)
 		)`,
+		`CREATE TABLE IF NOT EXISTS soft_block_decisions (
+			site_id TEXT NOT NULL,
+			rule_id TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			ip TEXT NOT NULL,
+			created_at_unix_ms INTEGER NOT NULL,
+			expires_at_unix_ms INTEGER NOT NULL,
+			PRIMARY KEY (site_id, rule_id, ip),
+			CHECK (expires_at_unix_ms > created_at_unix_ms)
+		)`,
+		`CREATE INDEX IF NOT EXISTS soft_block_decisions_expiry ON soft_block_decisions(expires_at_unix_ms)`,
+		`CREATE TABLE IF NOT EXISTS soft_block_events (
+			id INTEGER PRIMARY KEY,
+			event_type TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '',
+			site_id TEXT NOT NULL,
+			rule_id TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			ip TEXT NOT NULL,
+			at_unix_ms INTEGER NOT NULL,
+			expires_at_unix_ms INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS maintenance_state (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := store.db.ExecContext(ctx, statement); err != nil {
@@ -125,6 +154,15 @@ func (store *Store) createSchema(ctx context.Context) error {
 	}
 	if err := store.addColumnIfMissing(ctx, "detections", "log_source", `TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
+	}
+	for _, column := range []struct{ name, definition string }{
+		{"method", `TEXT NOT NULL DEFAULT ''`},
+		{"path", `TEXT NOT NULL DEFAULT ''`},
+		{"status", `INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if err := store.addColumnIfMissing(ctx, "detections", column.name, column.definition); err != nil {
+			return err
+		}
 	}
 	if err := store.removeObsoleteColumns(ctx, "traffic_samples", "updated_at_unix_ms"); err != nil {
 		return err
@@ -384,9 +422,9 @@ func (store *Store) RecordDetection(ctx context.Context, detection engine.Detect
 	_, err = store.db.ExecContext(ctx, `INSERT INTO detections (
 		log_source, event_time_unix_ns, event_time_text, recorded_at_unix_ms,
 		rule_id, grouping_id, group_values_json,
-		trigger_ip, trigger_user_agent, request_count, window_millis,
+		trigger_ip, trigger_user_agent, method, path, status, request_count, window_millis,
 		threshold, dry_run
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		detection.LogSource,
 		event.Timestamp.UnixNano(),
 		event.Timestamp.Format(time.RFC3339Nano),
@@ -396,6 +434,9 @@ func (store *Store) RecordDetection(ctx context.Context, detection engine.Detect
 		string(groupValues),
 		event.IP.Unmap().String(),
 		event.UserAgent,
+		event.Method,
+		event.Path,
+		event.Status,
 		detection.Count,
 		detection.Window.Milliseconds(),
 		detection.Threshold,
@@ -447,6 +488,55 @@ func (store *Store) DeleteBlock(ctx context.Context, ip netip.Addr) error {
 		return fmt.Errorf("delete active block record for %s: %w", ip, err)
 	}
 	return nil
+}
+
+const nftMigrationStateKey = "nftables_to_soft_block"
+
+func (store *Store) NFTMigrationState(ctx context.Context) (string, error) {
+	var value string
+	err := store.db.QueryRowContext(ctx, `SELECT value FROM maintenance_state WHERE key = ?`, nftMigrationStateKey).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read nftables migration state: %w", err)
+	}
+	return value, nil
+}
+
+func (store *Store) MarkNFTMigrationPending(ctx context.Context) error {
+	_, err := store.db.ExecContext(ctx, `INSERT INTO maintenance_state(key,value) VALUES(?, 'firewall_pending')
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, nftMigrationStateKey)
+	if err != nil {
+		return fmt.Errorf("record pending nftables migration: %w", err)
+	}
+	return nil
+}
+
+// CompleteNFTMigration cancels legacy firewall records only after the owned
+// nftables table has been removed. The transaction makes retries idempotent.
+func (store *Store) CompleteNFTMigration(ctx context.Context) (int64, error) {
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin nftables migration completion: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `DELETE FROM active_blocks`)
+	if err != nil {
+		return 0, fmt.Errorf("cancel legacy active block records: %w", err)
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count cancelled active block records: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO maintenance_state(key,value) VALUES(?, 'complete')
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, nftMigrationStateKey); err != nil {
+		return 0, fmt.Errorf("record completed nftables migration: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit nftables migration completion: %w", err)
+	}
+	return removed, nil
 }
 
 func (store *Store) Close() error {

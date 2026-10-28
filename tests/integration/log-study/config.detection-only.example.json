@@ -1,0 +1,41 @@
+{
+  "start_position": "beginning",
+  "block_mode": "dry_run",
+  "block_duration": "1m",
+  "database_path": "/tmp/antiddos-log-study.sqlite",
+  "log_sources": {
+    "nginx_bgt_access": {
+      "path": "/home/semyon/Downloads/bgtweb_logs/bgtweb_logs/nginx/bgtweb_access.log",
+      "format": "nginx_combined"
+    },
+    "nginx_all_access": {
+      "path": "/home/semyon/Downloads/bgtweb_logs/bgtweb_logs/nginx/bgtweb_all_access.log",
+      "format": "nginx_combined"
+    },
+    "nginx_error": {
+      "path": "/home/semyon/Downloads/bgtweb_logs/bgtweb_logs/nginx/error.log",
+      "format": "nginx_error"
+    },
+    "ssh_auth": {
+      "path": "/home/semyon/Downloads/bgtweb_logs/bgtweb_logs/system/auth.log",
+      "format": "syslog_sshd"
+    },
+    "netfilter": {
+      "path": "/home/semyon/Downloads/bgtweb_logs/bgtweb_logs/system/kern.log",
+      "format": "netfilter_log"
+    }
+  },
+  "engine": {
+    "rules": [
+      {"id":"web-scan-sensitive","type":"signature","action":"dry_run","log_source":"nginx_bgt_access","path_regex":"^/(?:\\.env|\\.git(?:/|$)|\\.aws(?:/|$)|etc/passwd|proc/self|vendor/phpunit|wp-login\\.php|xmlrpc\\.php)(?:/|$)","window":"1s","threshold":1,"group_by":"ip","ignore_ips":[]},
+      {"id":"web-admin-probe","type":"rate","action":"dry_run","log_source":"nginx_all_access","path_regex":"^/(?:admin|administrator|login|wp-admin|phpmyadmin|manager)(?:/|$)","window":"60s","threshold":10,"group_by":"ip","ignore_ips":[]},
+      {"id":"web-sqli-probe","type":"signature","action":"dry_run","log_source":"nginx_all_access","path_regex":"(?i)(?:union(?:%20|\\+|\\s)+select|select(?:%20|\\+|\\s)+.+(?:from|into)|or(?:%20|\\+|\\s)+1=1|sleep\\(|benchmark\\()","window":"1s","threshold":1,"group_by":"ip","ignore_ips":[]},
+      {"id":"web-path-scan","type":"rate","action":"dry_run","log_source":"nginx_all_access","path_regex":"^/(?:cgi-bin|actuator|server-status|\\.well-known/security\\.txt)(?:/|$)","window":"30s","threshold":8,"group_by":"ip","ignore_ips":[]},
+      {"id":"nginx-rate-limit-burst","type":"rate","action":"dry_run","log_source":"nginx_error","path_regex":"^/nginx/error$","window":"30s","threshold":10,"group_by":"ip","ignore_ips":[]},
+      {"id":"nginx-basic-auth-fail","type":"rate","action":"dry_run","log_source":"nginx_error","path_regex":"^/auth/basic/failure$","window":"60s","threshold":5,"group_by":"ip","ignore_ips":[]},
+      {"id":"ssh-password-bruteforce","type":"rate","action":"dry_run","log_source":"ssh_auth","path_regex":"^/ssh/failed$","window":"60s","threshold":5,"group_by":"ip","ignore_ips":[]},
+      {"id":"ssh-invalid-user-scan","type":"rate","action":"dry_run","log_source":"ssh_auth","path_regex":"^/ssh/invalid-user$","window":"60s","threshold":3,"group_by":"ip","ignore_ips":[]},
+      {"id":"port-scan-burst","type":"rate","action":"dry_run","log_source":"netfilter","path_regex":"^/port/(?:tcp|udp)/[0-9]{1,5}$","window":"30s","threshold":8,"group_by":"ip","ignore_ips":[]}
+    ]
+  }
+}

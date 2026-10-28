@@ -23,16 +23,21 @@ const (
 )
 
 type Rule struct {
-	ID        string
-	LogSource string
-	PathRegex string
-	Window    time.Duration
-	Threshold int
-	GroupBy   GroupField
-	IgnoreIPs []string
+	ID         string
+	Disabled   bool
+	LogSource  string
+	PathRegex  string
+	QueryRegex string
+	Statuses   []int
+	UniqueBy   string
+	Window     time.Duration
+	Threshold  int
+	GroupBy    GroupField
+	IgnoreIPs  []string
 }
 
 type Detection struct {
+	SiteID         string
 	RuleID         string
 	LogSource      string
 	RuleRevision   string
@@ -72,14 +77,18 @@ type Options struct {
 }
 
 type compiledRule struct {
-	id        string
-	logSource string
-	revision  string
-	pathRegex *regexp.Regexp
-	window    time.Duration
-	threshold int
-	ignoreIPs []netip.Prefix
-	grouping  compiledGrouping
+	id         string
+	disabled   bool
+	logSource  string
+	revision   string
+	pathRegex  *regexp.Regexp
+	queryRegex *regexp.Regexp
+	statuses   map[int]struct{}
+	uniqueBy   string
+	window     time.Duration
+	threshold  int
+	ignoreIPs  []netip.Prefix
+	grouping   compiledGrouping
 }
 
 type compiledGrouping struct {
@@ -156,6 +165,17 @@ func compileRule(rule Rule) (compiledRule, error) {
 	if err != nil {
 		return compiledRule{}, fmt.Errorf("path regex: %w", err)
 	}
+	var queryRegex *regexp.Regexp
+	if rule.QueryRegex != "" {
+		queryRegex, err = regexp.Compile(rule.QueryRegex)
+		if err != nil {
+			return compiledRule{}, fmt.Errorf("query regex: %w", err)
+		}
+	}
+	statuses := make(map[int]struct{}, len(rule.Statuses))
+	for _, status := range rule.Statuses {
+		statuses[status] = struct{}{}
+	}
 	if rule.Window <= 0 {
 		return compiledRule{}, fmt.Errorf("window must be positive")
 	}
@@ -171,7 +191,7 @@ func compileRule(rule Rule) (compiledRule, error) {
 		return compiledRule{}, err
 	}
 	return compiledRule{
-		id: rule.ID, logSource: rule.LogSource, revision: revision, pathRegex: pathRegex, window: rule.Window,
+		id: rule.ID, disabled: rule.Disabled, logSource: rule.LogSource, revision: revision, pathRegex: pathRegex, queryRegex: queryRegex, statuses: statuses, uniqueBy: rule.UniqueBy, window: rule.Window,
 		threshold: rule.Threshold,
 		grouping:  compiledGrouping{field: rule.GroupBy, key: key, groups: make(map[GroupKey]*timestampWindow)},
 	}, nil
@@ -187,6 +207,9 @@ func (engine *Engine) Process(event request.Event) ([]Evaluation, error) {
 // request selector matched. The match result includes rule-whitelisted events,
 // which remain visible to traffic statistics but do not enter that rule's window.
 func (engine *Engine) ProcessWithMatch(event request.Event) ([]Evaluation, bool, error) {
+	if event.ResponseOrigin == "challenge" || event.ResponseOrigin == "service" {
+		return nil, false, nil
+	}
 	if engine.IsIgnored(event) {
 		return nil, engine.Matches(event), nil
 	}
@@ -220,9 +243,21 @@ func (engine *Engine) ProcessWithMatch(event request.Event) ([]Evaluation, bool,
 			}
 		}
 		window.prune(timestamp.Add(-rule.window))
-		window.append(timestamp)
+		if rule.uniqueBy != "" {
+			value := event.Path
+			if rule.uniqueBy == "destination_port" {
+				parts := strings.Split(event.Path, "/")
+				value = parts[len(parts)-1]
+			}
+			window.appendValue(timestamp, value)
+		} else {
+			window.append(timestamp)
+		}
 		grouping.schedule(window, timestamp.Add(rule.window))
 		count := window.len()
+		if rule.uniqueBy != "" {
+			count = window.uniqueLen()
+		}
 		violated := count >= rule.threshold
 		evaluation := Evaluation{
 			RuleID: rule.id, GroupField: grouping.field, GroupValue: value,
@@ -293,7 +328,29 @@ func (engine *Engine) Matches(event request.Event) bool {
 }
 
 func (rule *compiledRule) matches(event request.Event) bool {
-	return event.Method == "GET" && rule.pathRegex.MatchString(event.Path)
+	if rule.disabled {
+		return false
+	}
+	// HTTP access rules retain the historical GET-only behavior. Security log
+	// parsers use explicit non-HTTP methods and are matched by their normalized
+	// event path (for example /ssh/failed or /port/tcp/22).
+	switch event.Method {
+	case "GET", "SSH", "NETFILTER", "NGINX_ERROR":
+	default:
+		return false
+	}
+	if !rule.pathRegex.MatchString(event.Path) {
+		return false
+	}
+	if rule.queryRegex != nil && !rule.queryRegex.MatchString(event.RawQuery) {
+		return false
+	}
+	if len(rule.statuses) > 0 {
+		if _, ok := rule.statuses[event.Status]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (engine *Engine) Cleanup() {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,47 @@ func TestDecodeLegacySingleLogRemainsCompatible(t *testing.T) {
 	}
 }
 
+func TestDecodeRuleTypes(t *testing.T) {
+	cfg, err := decode(strings.NewReader(`{"log_file":"/tmp/access.log","engine":{"rules":[{"id":"probe","type":"signature","path_regex":"^/\\.env$","window":"1s","threshold":1,"group_by":"ip"}]}}`), "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Engine.Rules[0]; got.Type != "signature" || got.Threshold != 1 || got.Window != time.Second {
+		t.Fatalf("signature rule = %#v", got)
+	}
+}
+
+func TestDecodeCardinalityRule(t *testing.T) {
+	cfg, err := decode(strings.NewReader(`{"log_file":"/tmp/access.log","engine":{"rules":[{"id":"ports","type":"cardinality","unique_by":"destination_port","path_regex":"^/port/","window":"30s","threshold":8,"group_by":"ip"}]}}`), "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Engine.Rules[0]; got.Type != "cardinality" || got.UniqueBy != "destination_port" || got.Threshold != 8 {
+		t.Fatalf("cardinality rule = %#v", got)
+	}
+	if _, err := decode(strings.NewReader(`{"log_file":"/tmp/access.log","engine":{"rules":[{"id":"ports","type":"cardinality","path_regex":".*","window":"30s","threshold":8,"group_by":"ip"}]}}`), "test", ""); err == nil {
+		t.Fatal("cardinality rule without unique_by was accepted")
+	}
+}
+
+func TestSecurityExampleConfigDecodes(t *testing.T) {
+	file, err := os.Open("../../deploy/config.security.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	cfg, err := decode(file, "security example", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BlockMode != BlockModeDryRun || len(cfg.LogSources) != 4 || len(cfg.Engine.Rules) != 9 {
+		t.Fatalf("unexpected security example: mode=%s sources=%d rules=%d", cfg.BlockMode, len(cfg.LogSources), len(cfg.Engine.Rules))
+	}
+	if cfg.Engine.Rules[7].Enabled || cfg.Engine.Rules[7].Type != "cardinality" {
+		t.Fatalf("port preset must ship disabled cardinality: %#v", cfg.Engine.Rules[7])
+	}
+}
+
 func TestDecodeLogSourceFormatConfiguration(t *testing.T) {
 	document := `{
 		"log_sources": {
@@ -84,7 +126,7 @@ func TestDecodeRejectsInvalidOrAmbiguousLogSourceConfig(t *testing.T) {
 		{"override on multi config", `{"log_sources":{"a":"/tmp/a.log"},"engine":{"rules":[{"id":"r","log_source":"a","path_regex":"^/$","window":"1s","threshold":1,"group_by":"ip"}]}}`, "/tmp/override.log"},
 		{"bad rule whitelist", `{"log_file":"/tmp/a.log","engine":{"rules":[{"id":"r","path_regex":"^/$","window":"1s","threshold":1,"group_by":"ip","ignore_ips":["example.com"]}]}}`, ""},
 		{"missing custom log format", `{"log_sources":{"a":{"path":"/tmp/a.log","format":"nginx_custom"}},"engine":{"rules":[{"id":"r","path_regex":"^/$","window":"1s","threshold":1,"group_by":"ip"}]}}`, ""},
-		{"unknown format", `{"log_sources":{"a":{"path":"/tmp/a.log","format":"nginx_error"}},"engine":{"rules":[{"id":"r","path_regex":"^/$","window":"1s","threshold":1,"group_by":"ip"}]}}`, ""},
+		{"unknown format", `{"log_sources":{"a":{"path":"/tmp/a.log","format":"unsupported_format"}},"engine":{"rules":[{"id":"r","path_regex":"^/$","window":"1s","threshold":1,"group_by":"ip"}]}}`, ""},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

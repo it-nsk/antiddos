@@ -3,14 +3,56 @@ package webcontrol
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/it-nsk/antiddos/internal/challengeadmin"
 	"github.com/it-nsk/antiddos/internal/configservice"
 	"github.com/it-nsk/antiddos/internal/storage"
 )
+
+func TestChallengeMetricsProxy(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "checker.sock")
+	l, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/status" {
+			_, _ = w.Write([]byte(`{"health":"ready","sites":1,"metrics_health":"ready","metrics_dropped":0}`))
+			return
+		}
+		_, _ = w.Write([]byte(`[{"bucket":1,"site":"main","reason":"issued","count":3}]`))
+	})}
+	go server.Serve(l)
+	defer server.Close()
+	s := &Service{Challenge: &challengeadmin.Client{SocketPath: socket}}
+	now := time.Now().UTC().Truncate(time.Second)
+	path := fmt.Sprintf("/v1/challenge/metrics?from=%d&to=%d&limit=10", now.Add(-time.Hour).Unix(), now.Unix())
+	response := httptest.NewRecorder()
+	s.handler().ServeHTTP(response, httptest.NewRequest("GET", path, nil))
+	if response.Code != 200 || !strings.Contains(response.Body.String(), `"count":3`) {
+		t.Fatalf("response %d: %s", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	s.handler().ServeHTTP(response, httptest.NewRequest("GET", "/v1/challenge/metrics?from=0&to=9999999&limit=1001", nil))
+	if response.Code != 400 {
+		t.Fatalf("invalid range status=%d", response.Code)
+	}
+	server.Close()
+	response = httptest.NewRecorder()
+	s.handler().ServeHTTP(response, httptest.NewRequest("GET", path, nil))
+	if response.Code != 503 {
+		t.Fatalf("unavailable status=%d", response.Code)
+	}
+}
 
 func TestDaemonWebAPIOverUnixSocket(t *testing.T) {
 	dir := t.TempDir()
@@ -123,6 +165,13 @@ func TestDaemonWebAPIOverUnixSocket(t *testing.T) {
 	}
 	if len(dashboard.Points) == 0 || len(dashboard.Points) > 600 || dashboard.Detections == nil || dashboard.Blocks == nil {
 		t.Fatalf("dashboard bounds: %+v", dashboard)
+	}
+	decisions, err := client.SoftBlocks(context.Background(), 10)
+	if err != nil || decisions == nil || len(decisions) != 0 {
+		t.Fatalf("soft blocks=%+v error=%v", decisions, err)
+	}
+	if _, err := client.SoftBlocks(context.Background(), 1001); err == nil {
+		t.Fatal("unbounded soft-block query accepted")
 	}
 	var output any
 	if err := client.request(context.Background(), "PUT", "/v1/config/rules", map[string]any{"revision": changed.Config.Revision, "unknown": true}, &output); err == nil {

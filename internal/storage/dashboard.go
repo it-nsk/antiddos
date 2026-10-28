@@ -27,6 +27,9 @@ type DashboardDetection struct {
 	Group      string `json:"group"`
 	IP         string `json:"ip"`
 	UserAgent  string `json:"user_agent"`
+	Method     string `json:"method"`
+	Path       string `json:"path"`
+	Status     int64  `json:"status"`
 	Count      int64  `json:"count"`
 	WindowMS   int64  `json:"window_ms"`
 	Threshold  int64  `json:"threshold"`
@@ -193,7 +196,7 @@ func (r *Reader) Dashboard(ctx context.Context, from, to time.Time, before int64
 		p.Interval = end - start
 		d.Points = append(d.Points, p)
 	}
-	query := `SELECT id,log_source,event_time_text,recorded_at_unix_ms,rule_id,grouping_id,group_values_json,trigger_ip,trigger_user_agent,request_count,window_millis,threshold FROM detections WHERE event_time_unix_ns>=? AND event_time_unix_ns<?`
+	query := `SELECT id,log_source,event_time_text,recorded_at_unix_ms,rule_id,grouping_id,group_values_json,trigger_ip,trigger_user_agent,method,path,status,request_count,window_millis,threshold FROM detections WHERE event_time_unix_ns>=? AND event_time_unix_ns<?`
 	args := []any{from.UnixNano(), to.UnixNano()}
 	if before > 0 {
 		query += ` AND id<?`
@@ -207,7 +210,7 @@ func (r *Reader) Dashboard(ctx context.Context, from, to time.Time, before int64
 	}
 	for rows.Next() {
 		var v DashboardDetection
-		if err := rows.Scan(&v.ID, &v.SourceID, &v.EventTime, &v.RecordedAt, &v.Rule, &v.GroupBy, &v.Group, &v.IP, &v.UserAgent, &v.Count, &v.WindowMS, &v.Threshold); err != nil {
+		if err := rows.Scan(&v.ID, &v.SourceID, &v.EventTime, &v.RecordedAt, &v.Rule, &v.GroupBy, &v.Group, &v.IP, &v.UserAgent, &v.Method, &v.Path, &v.Status, &v.Count, &v.WindowMS, &v.Threshold); err != nil {
 			rows.Close()
 			return d, err
 		}

@@ -1,0 +1,27 @@
+{
+  "database_path": "/var/lib/antiddos/antiddos.sqlite",
+  "start_position": "end",
+  "block_mode": "dry_run",
+  "block_duration": "5m",
+  "block_tcp_ports": [22, 80, 443],
+  "log_sources": {
+    "web_access": {"path":"/var/log/nginx/access.log","format":"nginx_combined"},
+    "nginx_error": {"path":"/var/log/nginx/error.log","format":"nginx_error"},
+    "ssh_auth": {"path":"/var/log/auth.log","format":"syslog_sshd"},
+    "netfilter": {"path":"/var/log/ufw.log","format":"netfilter_log"}
+  },
+  "engine": {
+    "ignore_ips": ["127.0.0.1", "::1"],
+    "rules": [
+      {"id":"web-sensitive","enabled":true,"type":"signature","action":"dry_run","log_source":"web_access","path_regex":"(?i)(?:^|/)(?:\\.env(?:[/._-]|$)|\\.git(?:/|$)|\\.aws(?:/|$)|proc/self|etc/passwd)","window":"1s","threshold":1,"group_by":"ip","ignore_ips":[]},
+      {"id":"web-home-burst","enabled":false,"type":"rate","action":"dry_run","log_source":"web_access","path_regex":"^/$","window":"5s","threshold":10,"group_by":"ip","ignore_ips":[]},
+      {"id":"web-admin-probe","enabled":true,"type":"rate","action":"dry_run","log_source":"web_access","path_regex":"^/(?:admin|administrator|login|wp-admin|phpmyadmin|manager)(?:/|$)","window":"60s","threshold":10,"group_by":"ip","ignore_ips":[]},
+      {"id":"web-sqli-query","enabled":true,"type":"signature","action":"dry_run","log_source":"web_access","path_regex":".*","query_regex":"(?i)(?:union(?:%20|\\+|\\s)+select|or(?:%20|\\+|\\s)+1=1|sleep\\(|benchmark\\()","window":"1s","threshold":1,"group_by":"ip","ignore_ips":[]},
+      {"id":"nginx-basic-auth","enabled":false,"type":"rate","action":"dry_run","log_source":"nginx_error","path_regex":"^/auth/basic/failure$","window":"60s","threshold":5,"group_by":"ip","ignore_ips":[]},
+      {"id":"ssh-password","enabled":false,"type":"rate","action":"dry_run","log_source":"ssh_auth","path_regex":"^/ssh/failed$","window":"60s","threshold":5,"group_by":"ip","ignore_ips":[]},
+      {"id":"ssh-invalid-user","enabled":false,"type":"rate","action":"dry_run","log_source":"ssh_auth","path_regex":"^/ssh/invalid-user$","window":"60s","threshold":3,"group_by":"ip","ignore_ips":[]},
+      {"id":"port-scan","enabled":false,"type":"cardinality","unique_by":"destination_port","action":"dry_run","log_source":"netfilter","path_regex":"^/port/(?:tcp|udp)/[0-9]{1,5}$","window":"30s","threshold":8,"group_by":"ip","ignore_ips":[]},
+      {"id":"web-unique-paths","enabled":false,"type":"cardinality","unique_by":"path","action":"dry_run","log_source":"web_access","path_regex":".*","window":"30s","threshold":30,"group_by":"ip","ignore_ips":[]}
+    ]
+  }
+}

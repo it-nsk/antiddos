@@ -1,0 +1,77 @@
+{
+  "block_duration": "1m",
+  "block_mode": "hybrid",
+  "block_tcp_ports": [443],
+  "database_path": "/var/lib/antiddos/antiddos.sqlite",
+  "start_position": "end",
+  "log_sources": {
+    "bgt_access": {
+      "path": "/var/log/nginx/bgtweb_antiddos.log",
+      "format": "nginx_custom",
+      "log_format": "$remote_addr - - [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\" \"$antiddos_response_origin\""
+    },
+    "bgt2_access": {
+      "path": "/var/log/nginx/bgt2_antiddos.log",
+      "format": "nginx_custom",
+      "log_format": "$remote_addr - - [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\" \"$antiddos_response_origin\""
+    }
+  },
+  "engine": {
+    "ignore_ips": [],
+    "rules": [
+      {
+        "id": "bgt-soft",
+        "action": "soft_block",
+        "log_source": "bgt_access",
+        "path_regex": "^/captcha-demo$",
+        "window": "10s",
+        "threshold": 8,
+        "group_by": "ip",
+        "ignore_ips": []
+      },
+      {
+        "id": "bgt-hard",
+        "action": "nftables",
+        "log_source": "bgt_access",
+        "path_regex": "^/captcha-demo$",
+        "window": "1s",
+        "threshold": 10,
+        "group_by": "ip",
+        "ignore_ips": []
+      },
+      {
+        "id": "bgt2-soft",
+        "action": "soft_block",
+        "log_source": "bgt2_access",
+        "path_regex": "^/captcha-demo$",
+        "window": "10s",
+        "threshold": 8,
+        "group_by": "ip",
+        "ignore_ips": []
+      },
+      {
+        "id": "bgt2-hard",
+        "action": "nftables",
+        "log_source": "bgt2_access",
+        "path_regex": "^/captcha-demo$",
+        "window": "1s",
+        "threshold": 10,
+        "group_by": "ip",
+        "ignore_ips": []
+      }
+    ]
+  },
+  "soft_block": {
+    "cookie_ttl": "1m",
+    "sites": {
+      "bgt": {
+        "hosts": ["bgt.my"],
+        "log_sources": ["bgt_access"]
+      },
+      "bgt2": {
+        "hosts": ["bgt2.test"],
+        "log_sources": ["bgt2_access"]
+      }
+    }
+  }
+}

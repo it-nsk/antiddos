@@ -7,11 +7,14 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"os/user"
+	"strconv"
 	"time"
 
 	"github.com/it-nsk/antiddos/internal/action"
 	"github.com/it-nsk/antiddos/internal/blockmanager"
 	"github.com/it-nsk/antiddos/internal/blockpolicy"
+	"github.com/it-nsk/antiddos/internal/challengeadmin"
 	"github.com/it-nsk/antiddos/internal/config"
 	"github.com/it-nsk/antiddos/internal/configservice"
 	"github.com/it-nsk/antiddos/internal/control"
@@ -20,6 +23,8 @@ import (
 	"github.com/it-nsk/antiddos/internal/parser"
 	"github.com/it-nsk/antiddos/internal/reader"
 	"github.com/it-nsk/antiddos/internal/request"
+	"github.com/it-nsk/antiddos/internal/softblock"
+	"github.com/it-nsk/antiddos/internal/softfeed"
 	"github.com/it-nsk/antiddos/internal/storage"
 	"github.com/it-nsk/antiddos/internal/webcontrol"
 )
@@ -31,6 +36,8 @@ type RunOptions struct {
 	Config, LogFile                    string
 	ControlSocketPath, WebSocketPath   string
 	FromStart, PrintLines, PrintEvents bool
+	SoftFeedSocketPath                 string
+	SoftFeedSocketGroupID              *int
 }
 
 func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
@@ -38,27 +45,53 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	switch cfg.BlockMode {
+	case config.BlockModeDryRun, config.BlockModeNFTables, config.BlockModeSoftBlock, config.BlockModeHybrid:
+	default:
+		return fmt.Errorf("unsupported block_mode %q", cfg.BlockMode)
+	}
 	if opts.FromStart {
 		cfg.StartPosition = string(reader.StartAtBeginning)
 	}
 	rulesBySource := make(map[string][]engine.Rule, len(cfg.LogSources))
 	parsersBySource := make(map[string]parser.Parser, len(cfg.LogSources))
 	ruleSource := make(map[string]string, len(cfg.Engine.Rules))
+	ruleActions := make(map[string]string, len(cfg.Engine.Rules))
 	for _, configuredRule := range cfg.Engine.Rules {
+		// Disabled presets remain visible and editable in the web interface, but
+		// must not make the daemon open an optional log file. This lets the
+		// production profile ship SSH/netfilter presets safely on hosts where
+		// those logs are not enabled yet.
+		if configuredRule.ExplicitlyDisabled {
+			continue
+		}
 		rule := engine.Rule{
-			ID: configuredRule.ID, LogSource: configuredRule.LogSource, IgnoreIPs: configuredRule.IgnoreIPs,
-			PathRegex: configuredRule.PathRegex,
-			Window:    configuredRule.Window, Threshold: configuredRule.Threshold,
+			ID: configuredRule.ID, Disabled: configuredRule.ExplicitlyDisabled, LogSource: configuredRule.LogSource, IgnoreIPs: configuredRule.IgnoreIPs,
+			PathRegex:  configuredRule.PathRegex,
+			QueryRegex: configuredRule.QueryRegex, Statuses: configuredRule.Statuses, UniqueBy: configuredRule.UniqueBy,
+			Window: configuredRule.Window, Threshold: configuredRule.Threshold,
 			GroupBy: engine.GroupField(configuredRule.GroupBy),
 		}
 		rulesBySource[configuredRule.LogSource] = append(rulesBySource[configuredRule.LogSource], rule)
 		ruleSource[configuredRule.ID] = configuredRule.LogSource
+		ruleActions[configuredRule.ID] = config.EffectiveRuleAction(cfg.BlockMode, configuredRule)
 	}
 	liveTail := cfg.StartPosition == string(reader.StartAtEnd)
 	ruleEngines := make(map[string]*engine.Engine, len(cfg.LogSources))
+	softSources := make(map[string]bool)
+	softSiteBySource := make(map[string]string)
+	for _, site := range cfg.SoftBlock.Sites {
+		for _, sourceID := range site.LogSources {
+			softSources[sourceID] = true
+			softSiteBySource[sourceID] = site.ID
+		}
+	}
 	var revisions []string
 	for _, source := range cfg.LogSources {
-		sourceParser, err := parser.New(source.Format, source.LogFormat)
+		if len(rulesBySource[source.ID]) == 0 {
+			continue
+		}
+		sourceParser, err := parser.NewWithOriginRequirement(source.Format, source.LogFormat, config.UsesSoftBlock(cfg) && softSources[source.ID])
 		if err != nil {
 			return fmt.Errorf("initialize parser for log source %q: %w", source.ID, err)
 		}
@@ -80,7 +113,7 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 		return fmt.Errorf("initialize block policy: %w", err)
 	}
 	var blockAction action.Action = action.DryRun{}
-	if cfg.BlockMode == config.BlockModeNFTables {
+	if config.UsesNFTables(cfg) {
 		blockAction = &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}
 	}
 	analysisConfigID := engine.AnalysisConfigID(revisions)
@@ -100,8 +133,11 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 	if err := manager.Cleanup(ctx, time.Now()); err != nil {
 		return fmt.Errorf("prune expired block records: %w", err)
 	}
-	if cfg.BlockMode == config.BlockModeNFTables {
+	if config.UsesNFTables(cfg) {
 		if err := manager.Restore(ctx, func(ip netip.Addr, ruleID string) bool {
+			if ruleActions[ruleID] != config.RuleActionNFTables {
+				return true
+			}
 			source := ruleSource[ruleID]
 			if ruleEngine, ok := ruleEngines[source]; ok {
 				return ruleEngine.IsIgnoredForRule(ip, ruleID)
@@ -118,6 +154,62 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 			return err
 		}
 	}
+	var softManager *softblock.Manager
+	var softFeedPath string
+	softFeedGroupID := -1
+	var softFeedEpoch string
+	softFeedEnabled := config.UsesSoftBlock(cfg) || os.Getenv("ANTIDDOS_SOFT_BLOCK_ENABLED") == "1"
+	softManager, err = softblock.New(blockPolicy, database, softfeed.MaxDecisions)
+	if err != nil {
+		return err
+	}
+	if err := softManager.Configure(cfg); err != nil {
+		return err
+	}
+	configDocument, err := (&configservice.Service{Path: opts.Config}).Read()
+	if err != nil {
+		return fmt.Errorf("read soft-block config revision: %w", err)
+	}
+	if err := softManager.SetConfigRevision(configDocument.Revision); err != nil {
+		return err
+	}
+	if err := softManager.Restore(ctx, cfg, time.Now(), func(ip netip.Addr, ruleID string) bool {
+		if source := ruleSource[ruleID]; source != "" {
+			if ruleEngine := ruleEngines[source]; ruleEngine != nil {
+				return ruleEngine.IsIgnoredForRule(ip, ruleID)
+			}
+		}
+		for _, ruleEngine := range ruleEngines {
+			if ruleEngine.IsIgnored(request.Event{IP: ip}) {
+				return true
+			}
+		}
+		return false
+	}); err != nil {
+		return fmt.Errorf("restore soft-block decisions: %w", err)
+	}
+	if softFeedEnabled {
+		softFeedPath = opts.SoftFeedSocketPath
+		if softFeedPath == "" {
+			softFeedPath = softfeed.DefaultSocketPath
+		}
+		if opts.SoftFeedSocketGroupID != nil {
+			softFeedGroupID = *opts.SoftFeedSocketGroupID
+		} else {
+			group, lookupErr := user.LookupGroup("antiddos-soft-feed")
+			if lookupErr != nil {
+				return fmt.Errorf("lookup antiddos-soft-feed group: %w", lookupErr)
+			}
+			softFeedGroupID, err = strconv.Atoi(group.Gid)
+			if err != nil {
+				return fmt.Errorf("parse antiddos-soft-feed GID: %w", err)
+			}
+		}
+		softFeedEpoch, err = softfeed.NewEpoch()
+		if err != nil {
+			return err
+		}
+	}
 	localErrors := make(chan error, 2)
 	localCtx, cancelLocal := context.WithCancel(ctx)
 	localServers := 0
@@ -127,7 +219,7 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 			<-localErrors
 		}
 	}()
-	if cfg.BlockMode == config.BlockModeNFTables && opts.ControlSocketPath != "" {
+	if config.UsesNFTables(cfg) && opts.ControlSocketPath != "" {
 		localServers++
 		go func() {
 			localErrors <- control.Serve(localCtx, opts.ControlSocketPath, manager)
@@ -144,17 +236,27 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 		}
 		defer webReader.Close()
 		service := &webcontrol.Service{
-			Config: &configservice.Service{Path: opts.Config},
-			Stats:  webReader,
-			Status: webcontrol.Status{ConfigRevision: webConfig.Revision, StartedAt: time.Now(), BlockMode: cfg.BlockMode},
+			Config:    &configservice.Service{Path: opts.Config},
+			Stats:     webReader,
+			Challenge: &challengeadmin.Client{},
+			Status:    webcontrol.Status{ConfigRevision: webConfig.Revision, StartedAt: time.Now(), BlockMode: cfg.BlockMode},
 		}
 		localServers++
 		go func() {
 			localErrors <- webcontrol.Serve(localCtx, opts.WebSocketPath, service)
 		}()
 	}
+	if softFeedEnabled {
+		localServers++
+		go func() {
+			localErrors <- softfeed.ServeWithGroup(localCtx, softFeedPath, softManager, softFeedEpoch, softFeedGroupID)
+		}()
+	}
 	followers := make([]*reader.Follower, 0, len(cfg.LogSources))
 	for _, source := range cfg.LogSources {
+		if len(rulesBySource[source.ID]) == 0 {
+			continue
+		}
 		follower, err := reader.Open(reader.Options{
 			Source: source.ID, Path: source.Path,
 			StartPosition: reader.StartPosition(cfg.StartPosition),
@@ -166,6 +268,9 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 			return err
 		}
 		followers = append(followers, follower)
+	}
+	if len(followers) == 0 {
+		return fmt.Errorf("no enabled rules")
 	}
 
 	readerCtx, cancelReader := context.WithCancel(ctx)
@@ -203,7 +308,21 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 	blockCleanupDone := make(chan struct{})
 	go func() {
 		defer close(blockCleanupDone)
-		manager.RunCleanup(blockCleanupCtx, time.Minute, func(err error) { logger.Error("prune expired block records", "error", err) })
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-blockCleanupCtx.Done():
+				return
+			case now := <-ticker.C:
+				if err := manager.Cleanup(blockCleanupCtx, now); err != nil {
+					logger.Error("prune expired block records", "error", err)
+				}
+				if err := softManager.Cleanup(blockCleanupCtx, now); err != nil {
+					logger.Error("prune expired soft-block decisions", "error", err)
+				}
+			}
+		}
 	}()
 	defer func() { cancelBlockCleanup(); <-blockCleanupDone }()
 	var expiryTicker *time.Ticker
@@ -272,10 +391,23 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 			statistics.emittedDetections++
 			statistics.thresholdDetections++
 			logDetection(logger, analysisConfigID, *evaluation.Detection)
-			result, err := manager.Process(ctx, *evaluation.Detection, time.Now())
-			logBlockResult(logger, result, cfg.BlockMode == config.BlockModeDryRun)
-			if err != nil {
-				logger.Error("persist active block", "ip", result.IP, "error", err)
+			actionName := ruleActions[evaluation.Detection.RuleID]
+			if actionName == config.RuleActionSoftBlock {
+				detection := *evaluation.Detection
+				detection.SiteID = softSiteBySource[detection.LogSource]
+				outcome, err := softManager.Process(ctx, detection, time.Now())
+				logger.Info("soft-block decision result", "outcome", outcome, "site", detection.SiteID, "rule", detection.RuleID, "ip", detection.GroupValue)
+				if err != nil {
+					logger.Error("persist soft-block decision", "rule", detection.RuleID, "error", err)
+				}
+			} else if actionName == config.RuleActionNFTables || cfg.BlockMode == config.BlockModeDryRun {
+				result, err := manager.Process(ctx, *evaluation.Detection, time.Now())
+				logBlockResult(logger, result, cfg.BlockMode == config.BlockModeDryRun)
+				if err != nil {
+					logger.Error("persist active block", "ip", result.IP, "error", err)
+				}
+			} else if actionName == config.RuleActionDryRun {
+				logger.Info("rule action skipped", "action", config.RuleActionDryRun, "rule", evaluation.Detection.RuleID, "group", evaluation.Detection.GroupValue)
 			}
 		}
 		if violating {

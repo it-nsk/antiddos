@@ -1,0 +1,20 @@
+{
+  "widget": {
+    "package": "altcha",
+    "version": "3.2.1",
+    "source": "https://registry.npmjs.org/altcha/-/altcha-3.2.1.tgz",
+    "license": "MIT",
+    "tarball_sha512": "317b27366820dc11898dad035db7e5bfd069dbdbb21afeb050899a693d722f108a3a3fb1f5004ca62fd5761e976cfe147f43f291a790c25f22bc902f221a28d0",
+    "bundle_sha256": "084f80ccaf3240ac03d9ce20a7a6379244223967c0e83e679e70a6d5822c5007",
+    "upstream_tag": "v3.2.1",
+    "upstream_commit": "156bb30"
+  },
+  "go_library": {
+    "module": "github.com/altcha-org/altcha-lib-go/v2",
+    "version": "v2.4.0",
+    "license": "MIT",
+    "go_sum": "h1:lDkaj6pMs1EBJf+CeHrFelpsyIXMdv6IpbDK6ym0clU=",
+    "upstream_tag": "v2.4.0",
+    "upstream_commit": "171c295"
+  }
+}

@@ -2,16 +2,197 @@
 
 Linux service that analyzes Nginx access logs, records traffic and detections in SQLite, and can temporarily block client IPs through nftables.
 
-## Quick start
+## Quick start: чистый Ubuntu-сервер, SSH и dry-run
 
-On a Linux amd64 server, replace the path with the access log for the site you want to monitor:
+Первый запуск состоит из трёх действий. Сервер и Nginx перезапускать не нужно;
+после сохранения настроек перезапускается только `antiddos.service`.
+
+1. По SSH установить daemon и UI одной командой:
 
 ```shell
-curl -fsSL https://raw.githubusercontent.com/it-nsk/antiddos/dev/scripts/install.sh -o /tmp/antiddos-install.sh && sudo bash /tmp/antiddos-install.sh --log-file /var/log/nginx/access.log --web
-sudo -u antiddos /usr/local/bin/antiddos monitor
+curl -fsSL https://raw.githubusercontent.com/it-nsk/antiddos/dev/scripts/install.sh -o /tmp/antiddos-install.sh && sudo bash /tmp/antiddos-install.sh --web
 ```
 
-The first command downloads and installs the latest release, creates both systemd services, and starts them in `dry_run` mode. On a fresh install it creates the GUI login `admin` and prompts for its password twice. The installer prints the config, traffic database, GUI user database, and browser/SSH access instructions. It creates `/etc/antiddos/config.json` from the example only if the file does not already exist; the traffic SQLite database is created when the daemon starts. `dry_run` records detections without changing the firewall. `monitor` refreshes every two seconds; press `Ctrl+C` to exit. The daemon keeps running.
+Установщик создаст системные сервисы, попросит пароль первого администратора и
+запустит безопасный режим `dry_run`.
+
+2. На рабочем компьютере открыть туннель и перейти на
+`http://127.0.0.1:8080`:
+
+```shell
+ssh -N -L 8080:127.0.0.1:8080 <ssh-user>@<server-address>
+```
+
+В **Правила и фильтры → Источники логов → Добавить источник** указать имя,
+абсолютный путь и формат. Доступны Nginx access, Nginx error, OpenSSH auth.log и
+UFW/kernel netfilter. При сохранении daemon сам проверяет существование файла и
+право чтения. Для нового источника UI одновременно создаёт безопасное базовое
+правило с действием `dry_run`:
+
+| Формат | Автоматическое базовое правило |
+| --- | --- |
+| Nginx access | 10 запросов к `/` от IP за 5 секунд |
+| Nginx error | 5 ошибок Basic Auth от IP за минуту |
+| OpenSSH auth.log | 5 неуспешных входов от IP за минуту |
+| UFW/kernel netfilter | 8 уникальных портов от IP за 30 секунд |
+
+Дополнительные правила (`.env`, admin scan, SQLi, invalid SSH users, уникальные
+URL) добавляются там же из готовых пресетов.
+
+3. Сохранить настройки и применить их одной командой:
+
+```shell
+sudo systemctl restart antiddos
+```
+
+После перезапуска **Обзор трафика** показывает данные каждого источника, а
+**Срабатывания и блокировки** -- совпавшие правила. В `dry_run` CAPTCHA и
+firewall не применяются.
+
+The log-to-rule mapping is:
+
+| Source | Preset | Initial signal |
+| --- | --- | --- |
+| Nginx access | `web-home-burst` | 10 `GET /` from one IP in 5 seconds |
+| Nginx access | `web-sensitive` | `.env`, `.git`, `.aws`, `/etc/passwd`, `/proc/self` once |
+| Nginx access | `web-admin-probe` | 10 admin/login paths from one IP in 60 seconds |
+| Nginx access | `web-sqli-query` | basic SQLi expression in query string once |
+| Nginx error | `nginx-basic-auth` | 5 Basic Auth failures from one IP in 60 seconds |
+| `auth.log` | `ssh-password` / `ssh-invalid-user` | failed passwords / invalid SSH users from one IP |
+| UFW or kernel log | `port-scan` | 8 distinct TCP/UDP destination ports from one IP in 30 seconds |
+
+These are observations mapped to MITRE ATT&CK techniques; the thresholds are
+safe starting hypotheses, not universal constants. Run them in `dry_run` for
+24--72 hours, investigate detections, whitelist known monitors/proxies, then
+adjust windows and thresholds. CAPTCHA and nftables are a separate explicit
+rollout and require no Nginx change during this monitoring phase.
+
+### Как строка лога становится detection
+
+AntiDDoS не обрабатывает только `GET /`. Каждый parser приводит строку своего
+журнала к одному событию: `timestamp`, `source`, `IP`, нормализованный `path`,
+а при наличии -- `method`, `query`, HTTP status и destination port. Правило
+выбирает эти поля, а не исходный текст лога.
+
+| Исходная строка | Нормализованное событие | Что означает правило |
+| --- | --- | --- |
+| `"GET /.env HTTP/1.1" 404 ...` в Nginx access | IP, `GET`, path `/.env` | `web-sensitive`: одно совпадение. Это типичный web wordlist/vulnerability scan (MITRE T1595). |
+| `"GET /?id=1+union+select..."` | IP, path `/`, query `id=...` | `web-sqli-query`: сигнатура в query, одно совпадение. Это попытка атаки на public-facing application (T1190). |
+| `user "admin": password mismatch, client: 203.0.113.7` в Nginx error | IP `203.0.113.7`, path `/auth/basic/failure` | `nginx-basic-auth`: 5 отказов за минуту -- подбор Basic Auth. |
+| `Failed password for root from 203.0.113.7 ...` в `auth.log` | IP `203.0.113.7`, path `/ssh/failed` | `ssh-password`: 5 отказов за минуту -- SSH brute force (T1110). |
+| `Failed password for invalid user admin from 203.0.113.7 ...` | IP `203.0.113.7`, path `/ssh/invalid-user` | `ssh-invalid-user`: 3 события за минуту -- разведка имён SSH-аккаунтов. |
+| `SRC=203.0.113.7 PROTO=TCP DPT=3306` в UFW/kernel log | IP `203.0.113.7`, path `/port/tcp/3306`, port `3306` | `port-scan`: 8 **разных** портов за 30 секунд -- network service discovery (T1046). |
+
+Базовый установочный `config.example.json` оставлен минимальным и совместимым с
+`--log-file`: один access log, правило главной страницы в `dry_run`. Полный
+`config.security.example.json` содержит также Nginx error, SSH и port-scan
+пресеты. В нём нет включённой реакции: все правила имеют `action: dry_run`;
+шумные SSH, UFW, unique URL и homepage правила выключены до калибровки. Их
+можно включить галкой в UI или полем `enabled: true` в JSON.
+
+### Примеры режимов конфигурации
+
+<details>
+<summary><strong>1. Обычный dry-run: безопасный первый запуск</strong></summary>
+
+Это единственный режим, который включается по умолчанию. Detection записывается
+в SQLite, журнал и UI; клиент, Nginx и firewall не меняются.
+
+```json
+{
+  "block_mode": "dry_run",
+  "log_sources": {
+    "web_access": {"path": "/var/log/nginx/site_access.log", "format": "nginx_combined"},
+    "ssh_auth": {"path": "/var/log/auth.log", "format": "syslog_sshd"},
+    "netfilter": {"path": "/var/log/ufw.log", "format": "netfilter_log"}
+  },
+  "engine": {"rules": [
+    {"id":"home-burst","enabled":true,"type":"rate","action":"dry_run","log_source":"web_access","path_regex":"^/$","window":"5s","threshold":10,"group_by":"ip"},
+    {"id":"ssh-password","enabled":false,"type":"rate","action":"dry_run","log_source":"ssh_auth","path_regex":"^/ssh/failed$","window":"60s","threshold":5,"group_by":"ip"},
+    {"id":"port-scan","enabled":false,"type":"cardinality","unique_by":"destination_port","action":"dry_run","log_source":"netfilter","path_regex":"^/port/(?:tcp|udp)/[0-9]{1,5}$","window":"30s","threshold":8,"group_by":"ip"}
+  ]}
+}
+```
+
+Сначала включаются только те источники, чьи файлы реально есть и читаются
+пользователем `antiddos`. После сохранения нужен только
+`sudo systemctl restart antiddos`.
+</details>
+
+<details>
+<summary><strong>2. Точечный nftables-ban для подтверждённого правила</strong></summary>
+
+Не включать до dry-run калибровки. В `hybrid` можно сделать ровно одно правило
+жёстким, а остальные оставить наблюдением. Ban действует на IP всего сервера на
+настроенных портах, а не только на один virtual host.
+
+```json
+{
+  "block_mode": "hybrid",
+  "block_duration": "5m",
+  "block_tcp_ports": [80, 443],
+  "engine": {"rules": [
+    {"id":"web-sensitive-audit","enabled":true,"type":"signature","action":"dry_run","log_source":"web_access","path_regex":"(?i)(?:^|/)(?:\\.env|\\.git|etc/passwd)","window":"1s","threshold":1,"group_by":"ip"},
+    {"id":"confirmed-hard-burst","enabled":false,"type":"rate","action":"nftables","log_source":"web_access","path_regex":"^/$","window":"1s","threshold":50,"group_by":"ip"}
+  ]}
+}
+```
+
+Перед включением `confirmed-hard-burst` надо проверить whitelist мониторингов,
+выполнить `sudo nft list ruleset`, а после -- `sudo systemctl restart antiddos`.
+</details>
+
+<details>
+<summary><strong>3. CAPTCHA: мягкий уровень для одного сайта</strong></summary>
+
+Это HTTP-only механизм. До смены JSON необходимо установить checker
+`sudo bash /tmp/antiddos-install.sh --soft-block`, создать dedicated access log
+сайта и подключить сгенерированные Nginx snippets. Для этого требуется ручная
+проверка `nginx -t` и reload Nginx; на обычный dry-run это не влияет.
+
+```json
+{
+  "block_mode": "hybrid",
+  "soft_block": {
+    "cookie_ttl": "30m",
+    "sites": {
+      "site": {"hosts": ["example.org"], "log_sources": ["site_access"]}
+    }
+  },
+  "engine": {"rules": [
+    {"id":"captcha-level","enabled":false,"type":"rate","action":"soft_block","log_source":"site_access","path_regex":"^/$","window":"10s","threshold":8,"group_by":"ip"}
+  ]}
+}
+```
+
+При пороге daemon создаёт решение для `site` и передаёт его checker через
+приватный Unix socket. Nginx делает внутренний `auth_request` checker-у; тот
+показывает ALTCHA и после успешного решения отдаёт подписанную cookie. Cookie
+пропускает пользователя до `cookie_ttl`. Без рабочего checker/socket Nginx
+работает fail-open, а не ломает сайт.
+</details>
+
+<details>
+<summary><strong>4. Два уровня: CAPTCHA, затем nftables</strong></summary>
+
+В одном `hybrid` конфиге два независимых правила смотрят на один access log:
+медленная аномалия ведёт на CAPTCHA, резкий burst -- в firewall. При совпадении
+обоих firewall имеет практический приоритет, пока не истечёт его TTL.
+
+```json
+{
+  "block_mode": "hybrid",
+  "engine": {"rules": [
+    {"id":"soft-level","enabled":false,"type":"rate","action":"soft_block","log_source":"site_access","path_regex":"^/$","window":"10s","threshold":8,"group_by":"ip"},
+    {"id":"hard-level","enabled":false,"type":"rate","action":"nftables","log_source":"site_access","path_regex":"^/$","window":"1s","threshold":50,"group_by":"ip"}
+  ]}
+}
+```
+
+Для этого примера нужны одновременно подготовленные `soft_block.sites`, checker,
+Nginx snippets и `block_tcp_ports`. Начинать следует с обоих правил в
+`action: dry_run` или `enabled: false`, затем включать по одному.
+</details>
 
 To change settings, edit `/etc/antiddos/config.json` and restart the service:
 
@@ -78,6 +259,12 @@ For remote access, keep the GUI bound to loopback and use `ssh -L 8080:127.0.0.1
 
 The default config watches one access log. For multiple logs, use `log_sources` and bind each rule to a source with `log_source` (example below).
 
+For a safe multi-source security starting point, use
+[`deploy/config.security.example.json`](deploy/config.security.example.json) and the
+Russian [installation and first-run guide](docs/first-run-security-presets.md).
+The installer also places this profile at
+`/etc/antiddos/config.security.example.json` without replacing the active config.
+
 <details>
 <summary>Find the right Nginx access log and its format</summary>
 
@@ -85,9 +272,13 @@ The default config watches one access log. For multiple logs, use `log_sources` 
 sudo nginx -T 2>/dev/null | grep -nE '^[[:space:]]*(server_name|log_format|access_log|error_log)'
 ```
 
-Match the `access_log` directive to the site's `server_name`. The supported inputs are Nginx **access logs** in `nginx_combined` or `nginx_custom` format. If the directive does not name a format, Nginx uses `combined`. For a custom format, copy its complete `log_format` directive into the matching source's `log_format` setting. AntiDDoS does not read or modify `nginx.conf`.
-
-`error_log` and SSH/authentication logs are not supported: they need different parsers and event rules.
+Match the `access_log` directive to the site's `server_name`. Supported inputs are
+Nginx access logs (`nginx_combined`, `nginx_custom`), Nginx errors
+(`nginx_error`), OpenSSH authentication logs (`syslog_sshd`), and kernel/UFW
+netfilter records (`netfilter_log`). If an Nginx access directive does not name a
+format, Nginx uses `combined`. For a custom format, copy its complete `log_format`
+directive into the matching source's `log_format` setting. AntiDDoS does not read
+or modify `nginx.conf`.
 
 </details>
 
@@ -166,9 +357,13 @@ After switching to `log_sources`, remove any active `ANTIDDOS_LOG_FILE` override
 
 `dry_run` is the default: detections are recorded and logged, but nftables is unchanged. To enable real blocking, install `nftables`, set `block_mode` to `nftables`, and restart `antiddos`. `block_duration` accepts whole minutes from `1m` to `60m`. Repeated detections do not extend an active block.
 
+`hybrid` gives every rule an independent `action`: `dry_run`, `soft_block`, or `nftables`. A site can therefore use two enforcement levels, another log source can be observation-only, and a third can use only firewall blocking in the same daemon. Every hybrid rule must set `action`; hybrid does not require all action types to be present. `soft_block` and `nftables` require `group_by: "ip"`, while `dry_run` remains analytical and may use the other supported groupings. If soft and firewall rules both match, the firewall block takes practical precedence until it expires; their leases remain independent.
+
+Outside `hybrid`, the global mode overrides the stored rule actions without deleting them: `dry_run` observes every rule, `soft_block` challenges every IP-grouped rule, and `nftables` firewall-blocks every IP-grouped rule. Returning to `hybrid` restores the per-rule choices.
+
 `block_tcp_ports` limits blocking to TCP destination ports, for example `[80, 443]`. If omitted or empty, the address is blocked on all protocols and ports. For Docker traffic, the `forward` rule sees the container-side port after destination NAT. Blocking is server-wide, not limited to one Nginx site. Behind a proxy, make sure Nginx records the real client IP before enabling enforcement.
 
-The systemd unit grants `CAP_NET_ADMIN` (Linux permission to manage host networking) to the service. In `dry_run`, the launcher drops this capability before starting the analyzer. AntiDDoS creates its own `inet antiddos` table and does not flush other nftables tables.
+The systemd unit grants `CAP_NET_ADMIN` (Linux permission to manage host networking) to the launcher. It is retained only when the effective rule actions include `nftables`; otherwise the launcher first removes any persisted old firewall leases and then drops the capability before starting the analyzer. AntiDDoS creates its own `inet antiddos` table and does not flush other nftables tables. An nftables action is selected by one site's log but blocks the client IP on the configured server ports, not only on that virtual host.
 
 <details>
 <summary>Monitor, unblock, and service commands</summary>
@@ -212,6 +407,24 @@ The daemon runs as the `antiddos` system user. Its main paths are:
 SQLite contains `traffic_samples`, `detections`, and `active_blocks`. Traffic is aggregated into 15-second buckets and flushed every 15 seconds. Detection rows are written when thresholds are reached. Active block records contain the IP and expiry; unexpired blocks are restored after daemon restart with only their remaining duration. Expired block history is removed from `active_blocks`.
 
 ## Development
+
+### Soft-block CAPTCHA demo
+
+Для демонстрации страницы ALTCHA локально откройте видимый Chrome:
+
+```shell
+bash tests/integration/softblock/demo.sh local
+```
+
+Страница работает только на loopback, использует временный самоподписанный сертификат и не делает внешних HTTP(S)-запросов. Дождитесь `Verified`, нажмите `Continue`, а после показа результата завершите демонстрацию через `Ctrl+C`. Для smoke-запуска без окна браузера используйте `SOFTBLOCK_DEMO_HEADLESS=1`.
+
+Для демонстрации полного сценария на Debian VM (реальный Nginx → checker через Unix-сокет) используйте отдельный пустой каталог отчёта:
+
+```shell
+bash tests/integration/softblock/demo.sh vm --output runtime/softblock/demo-vm-$(date +%Y%m%d-%H%M%S)
+```
+
+Итоги будут в `progress.md` и `results.json` указанного каталога.
 
 ```shell
 go test ./...

@@ -46,6 +46,41 @@ func TestActiveBlockRecordsAreReadableAndExpiredRowsCanBePruned(t *testing.T) {
 	}
 }
 
+func TestNFTMigrationStateAndCompletionAreTransactional(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "migration.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if state, err := store.NFTMigrationState(ctx); err != nil || state != "" {
+		t.Fatalf("initial state=%q err=%v", state, err)
+	}
+	now := time.Now().UTC()
+	if err := store.RecordBlock(ctx, netip.MustParseAddr("192.0.2.10"), "home", now, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkNFTMigrationPending(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := store.NFTMigrationState(ctx); err != nil || state != "firewall_pending" {
+		t.Fatalf("pending state=%q err=%v", state, err)
+	}
+	removed, err := store.CompleteNFTMigration(ctx)
+	if err != nil || removed != 1 {
+		t.Fatalf("removed=%d err=%v", removed, err)
+	}
+	if state, err := store.NFTMigrationState(ctx); err != nil || state != "complete" {
+		t.Fatalf("complete state=%q err=%v", state, err)
+	}
+	if blocks, err := store.UnexpiredBlocks(ctx, now); err != nil || len(blocks) != 0 {
+		t.Fatalf("blocks=%v err=%v", blocks, err)
+	}
+	if removed, err := store.CompleteNFTMigration(ctx); err != nil || removed != 0 {
+		t.Fatalf("idempotent removed=%d err=%v", removed, err)
+	}
+}
+
 func TestRecordBlockRejectsInvalidLease(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "state.sqlite"))
 	if err != nil {
