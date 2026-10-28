@@ -29,7 +29,7 @@ test('admin edits independent hybrid rule actions',async({page})=>{
   body.config.rules=body.config.rules.map((rule:any)=>({...rule,action:'dry_run'}));
   await route.fulfill({response,json:body});
  });
- await login(page);await page.getByRole('button',{name:/Правила и фильтры/}).click();
+ await login(page);await page.getByRole('button',{name:/Правила и фильтры/}).click();await page.getByRole('button',{name:/^homepage/}).click();
  const action=page.getByLabel('Действие homepage',{exact:true});await expect(action).toHaveValue('dry_run');
  await action.selectOption('nftables');page.once('dialog',dialog=>dialog.accept());
  await page.getByRole('button',{name:'Сохранить изменения',exact:true}).click();
@@ -85,7 +85,7 @@ test('admin: real daemon stats, graphs, whitelist, restart and users',async({pag
  await page.getByRole('button',{name:'1 час',exact:true}).click();await page.screenshot({path:`${artifact}/dashboard.png`,fullPage:true});
  await page.getByRole('button',{name:'Срабатывания и блокировки'}).click();await expect(page.getByRole('cell',{name:'192.0.2.10',exact:true}).first()).toBeVisible();await expect(page.getByRole('cell',{name:'login',exact:true})).toHaveCount(0);
  await page.getByRole('button',{name:/Пользователи/}).click();await expect(page.getByRole('cell',{name:'viewer',exact:true})).toBeVisible();
- await page.getByRole('button',{name:/Правила и фильтры/}).click();
+ await page.getByRole('button',{name:/Правила и фильтры/}).click();await page.getByRole('button',{name:/^homepage/}).click();
  await page.getByLabel('Глобальный IP 1',{exact:true}).fill('203.0.113.10');await page.getByRole('button',{name:'Добавить IP в глобальный whitelist',exact:true}).click();await page.getByLabel('Глобальный IP 2',{exact:true}).fill('203.0.113.20');
  await page.getByRole('button',{name:'Удалить глобальный IP 2',exact:true}).click();await page.getByRole('button',{name:'Добавить IP в глобальный whitelist',exact:true}).click();await page.getByLabel('Глобальный IP 2',{exact:true}).fill('2001:db8::1');
  await page.getByRole('button',{name:'Добавить IP в whitelist homepage',exact:true}).click();await page.getByRole('button',{name:'Добавить IP в whitelist homepage',exact:true}).click();
@@ -100,7 +100,7 @@ test('admin: real daemon stats, graphs, whitelist, restart and users',async({pag
 test('viewer: no mutation controls or user list; CLI password change revokes session',async({page})=>{
  test.setTimeout(60000);
  await login(page,'viewer');await expect(page.getByRole('button',{name:/Пользователи/})).toHaveCount(0);
- await page.getByRole('button',{name:/Правила и фильтры/}).click();await expect(page.getByLabel('Глобальный IP 1',{exact:true})).toHaveAttribute('readonly','');await expect(page.getByLabel('Регулярное выражение homepage',{exact:true})).toHaveAttribute('readonly','');await expect(page.getByRole('button',{name:'Добавить IP в глобальный whitelist',exact:true})).toHaveCount(0);await expect(page.getByRole('button',{name:'Сохранить изменения',exact:true})).toHaveCount(0);
+ await page.getByRole('button',{name:/Правила и фильтры/}).click();await page.getByRole('button',{name:/^homepage/}).click();await expect(page.getByLabel('Глобальный IP 1',{exact:true})).toHaveAttribute('readonly','');await expect(page.getByLabel('Регулярное выражение homepage',{exact:true})).toHaveAttribute('readonly','');await expect(page.getByRole('button',{name:'Добавить IP в глобальный whitelist',exact:true})).toHaveCount(0);await expect(page.getByRole('button',{name:'Сохранить изменения',exact:true})).toHaveCount(0);
  const fixture=JSON.parse(readFileSync(fixturePath,'utf8'));execFileSync(fixture.bin,['user','password','--users-db',fixture.users,'--password-stdin','viewer'],{input:'replacement-test-password\n'});
  await expect(page.getByRole('heading',{name:'Вход в AntiDDoS'})).toBeVisible({timeout:20000});
 });
@@ -112,7 +112,7 @@ test('validation errors never show saved or modify the config; conflicting edits
  const fixture=JSON.parse(readFileSync(fixturePath,'utf8'));
  const original=readFileSync(fixture.config,'utf8');
  await login(page);
- await page.getByRole('button',{name:/Правила и фильтры/}).click();
+ await page.getByRole('button',{name:/Правила и фильтры/}).click();await page.getByRole('button',{name:/^homepage/}).click();
  for(const [label,value] of [['Регулярное выражение homepage','['],['Глобальный IP 1','not-an-ip']]){
   await page.getByLabel(label,{exact:true}).fill(value);
   const response=page.waitForResponse(r=>r.url().endsWith('/api/config/rules')&&r.request().method()==='PUT');
