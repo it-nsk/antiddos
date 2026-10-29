@@ -67,6 +67,126 @@ safe starting hypotheses, not universal constants. Run them in `dry_run` for
 adjust windows and thresholds. CAPTCHA and nftables are a separate explicit
 rollout and require no Nginx change during this monitoring phase.
 
+<a id="nginx-custom-log-format"></a>
+### Как найти `log_format` для Nginx custom access
+
+Сначала найдите `access_log` нужного сайта и имя формата после пути:
+
+```shell
+sudo nginx -T 2>/dev/null | grep -nE '^[[:space:]]*(server_name|access_log|log_format)[[:space:]]'
+```
+
+Например, запись `access_log /var/log/nginx/site.log main;` использует формат
+`main`. В том же выводе найдите начинающуюся с `log_format main` директиву и
+целиком вставьте её в поле **Формат Nginx**, включая имя и завершающую `;`:
+
+```nginx
+log_format main '$remote_addr [$time_local] "$request" $status $body_bytes_sent';
+```
+
+Это именно директива из конфигурации Nginx, а не строка из файла журнала. Формат
+должен содержать `$remote_addr`, время, `$status` и `$request` (либо отдельно
+метод и URI). Если у `access_log` после пути нет имени, выберите в UI
+**Nginx combined access** — поле формата заполнять не нужно.
+
+<a id="nftables-blocking-setup"></a>
+### Как включить реальные блокировки через nftables
+
+Переходите к блокировкам только после 24–72 часов проверки правил в `dry_run`:
+
+1. Проверьте, что в access log записан настоящий IP посетителя. Если перед
+   Nginx стоит CDN или reverse proxy, сначала настройте real IP, иначе можно
+   заблокировать адрес прокси сразу для всего сервера.
+
+2. Добавьте свои адреса, мониторинг и доверенные сети в глобальный или
+   относящийся к правилу whitelist в UI.
+
+3. Проверьте наличие nftables и текущие правила хоста:
+
+   ```shell
+   command -v nft
+   sudo nft list ruleset
+   ```
+
+4. В `/etc/antiddos/config.json` ограничьте блокировку нужными TCP-портами:
+
+   ```json
+   "block_tcp_ports": [80, 443]
+   ```
+
+   Не добавляйте `22`, если не хотите блокировать SSH. Пустой список блокирует
+   адрес на всех протоколах и портах. AntiDDoS создаёт отдельную таблицу
+   `inet antiddos` и не очищает чужие таблицы nftables.
+
+5. В UI выберите **nftables** для всех правил или **Гибридный режим** и действие
+   **nftables** только для проверенных правил. Сохраните изменения и примените их:
+
+   ```shell
+   sudo systemctl restart antiddos
+   sudo systemctl status antiddos --no-pager
+   sudo nft list table inet antiddos
+   ```
+
+   Установленная systemd-служба уже выдаёт launcher право `CAP_NET_ADMIN`;
+   вручную запускать daemon от root или назначать бинарнику `setcap` не нужно.
+
+Для отката выберите в UI **Только наблюдение**, сохраните конфигурацию и снова
+перезапустите `antiddos`. Один адрес можно снять командой
+`sudo /usr/local/bin/antiddos unblock IP`.
+
+<a id="soft-block-captcha-setup"></a>
+### Как подключить Soft-block CAPTCHA
+
+CAPTCHA требует checker и небольших include-файлов Nginx. Делайте это после
+проверки правил в `dry_run`:
+
+1. Установите checker той же командой установки, добавив `--soft-block`:
+
+   ```shell
+   sudo bash /tmp/antiddos-install.sh --web --soft-block
+   ```
+
+2. В `/etc/antiddos/config.json` добавьте `soft_block.sites`: задайте короткий
+   ID сайта, его домены и источник отдельного access log. Пример конфигурации
+   находится ниже в разделе **CAPTCHA: мягкий уровень для одного сайта**.
+
+3. Создайте Nginx snippets для ID сайта (здесь он называется `site`):
+
+   ```shell
+   sudo /usr/local/bin/antiddos nginx-snippet \
+     --config /etc/antiddos/config.json \
+     --site site \
+     --output /etc/nginx/snippets/antiddos-site \
+     --write
+   sudo less /etc/nginx/snippets/antiddos-site/README.txt
+   ```
+
+   Сгенерированный `README.txt` перечисляет точные `include` для `http`,
+   `server` и существующего `proxy` либо `fastcgi` location. Не подключайте
+   одновременно proxy и FastCGI snippet в один location.
+
+4. Узнайте worker user Nginx и добавьте его в группу checker. На Ubuntu обычно
+   это `www-data`:
+
+   ```shell
+   sudo nginx -T 2>/dev/null | grep -m1 '^[[:space:]]*user[[:space:]]'
+   sudo usermod -a -G antiddos-check www-data
+   ```
+
+5. Проверьте конфигурацию, перезапустите Nginx для применения новой группы и
+   запустите службы:
+
+   ```shell
+   sudo nginx -t
+   sudo systemctl restart nginx antiddos antiddos-challenge
+   sudo /usr/local/bin/antiddos soft-block doctor \
+     --config /etc/antiddos/config.json --site site
+   ```
+
+После успешного `doctor` можно выбрать режим **Soft-block с CAPTCHA** или
+назначить `soft_block` отдельному правилу в hybrid-режиме. Без этого подключения
+оставьте режим `dry_run`.
+
 ### Как строка лога становится detection
 
 AntiDDoS не обрабатывает только `GET /`. Каждый parser приводит строку своего
