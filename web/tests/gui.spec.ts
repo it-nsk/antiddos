@@ -49,6 +49,17 @@ test('admin can configure cardinality presets in the rule wizard',async({page})=
  await expect(wizard.getByRole('combobox').nth(3)).toHaveValue('path');
  await expect(wizard.getByLabel('Порог',{exact:true})).toHaveValue('20');
 });
+test('SQLi preset fills a high-confidence query signature and explains its scope',async({page})=>{
+ await login(page);await page.getByRole('button',{name:/Правила и фильтры/}).click();
+ await page.getByRole('button',{name:'Добавить правило',exact:true}).click();
+ const wizard=page.locator('.rule-wizard');await wizard.getByRole('combobox').first().selectOption('web-sqli');
+ await expect(wizard.getByLabel('ID',{exact:true})).toHaveValue('web-sqli');
+ await expect(wizard.locator('label').filter({hasText:'Regex path'}).locator('input')).toHaveValue('.*');
+ await expect(wizard.locator('label').filter({hasText:'Regex query'}).locator('input')).toHaveValue(/union.*extractvalue.*benchmark/i);
+ await expect(wizard.getByText('проверяет все URL',{exact:false})).toBeVisible();
+ await expect(wizard.getByText('исходная query-строка из access.log',{exact:false})).toBeVisible();
+ await expect(wizard.getByText('Обычный ORDER BY',{exact:false})).toHaveCount(0);
+});
 test('admin adds an explicit readable log source with a safe dry-run preset',async({page})=>{
  const fixture=JSON.parse(readFileSync(fixturePath,'utf8'));
  const original=readFileSync(fixture.config,'utf8');
@@ -64,6 +75,7 @@ test('admin adds an explicit readable log source with a safe dry-run preset',asy
   await expect(page.getByRole('row').filter({hasText:'ssh_auth'})).toContainText('Ожидает сохранения');
   await page.getByRole('button',{name:'Сохранить изменения',exact:true}).click();
   await expect(page.getByRole('status')).toContainText('Сохранено');
+  await page.getByRole('button',{name:/^ssh_auth-ssh-password/}).click();
   await expect(page.getByLabel('Источник ssh_auth-ssh-password',{exact:true})).toHaveValue('ssh_auth');
   const config=JSON.parse(readFileSync(fixture.config,'utf8'));
   expect(config.log_sources.ssh_auth).toEqual({path:logPath,format:'syslog_sshd'});
@@ -121,7 +133,7 @@ test('validation errors never show saved or modify the config; conflicting edits
   await expect(page.getByRole('status')).toHaveCount(0);
   await expect(page.getByRole('alert').last()).toBeVisible();
   expect(readFileSync(fixture.config,'utf8')).toBe(original);
-  await page.getByRole('button',{name:'Отменить изменения',exact:true}).click();
+  await page.getByRole('button',{name:'Отменить',exact:true}).click();
  }
  await page.getByLabel('Регулярное выражение homepage',{exact:true}).fill('^/draft$');
  const external=JSON.parse(original);external.engine.rules[0].path_regex='^/external$';
