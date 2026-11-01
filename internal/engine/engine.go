@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -24,6 +25,7 @@ const (
 
 type Rule struct {
 	ID         string
+	Type       string
 	Disabled   bool
 	LogSource  string
 	PathRegex  string
@@ -49,6 +51,7 @@ type Detection struct {
 	Window         time.Duration
 	Threshold      int
 	DryRun         bool
+	Reason         string
 }
 
 type Evaluation struct {
@@ -78,6 +81,7 @@ type Options struct {
 
 type compiledRule struct {
 	id         string
+	ruleType   string
 	disabled   bool
 	logSource  string
 	revision   string
@@ -191,7 +195,7 @@ func compileRule(rule Rule) (compiledRule, error) {
 		return compiledRule{}, err
 	}
 	return compiledRule{
-		id: rule.ID, disabled: rule.Disabled, logSource: rule.LogSource, revision: revision, pathRegex: pathRegex, queryRegex: queryRegex, statuses: statuses, uniqueBy: rule.UniqueBy, window: rule.Window,
+		id: rule.ID, ruleType: rule.Type, disabled: rule.Disabled, logSource: rule.LogSource, revision: revision, pathRegex: pathRegex, queryRegex: queryRegex, statuses: statuses, uniqueBy: rule.UniqueBy, window: rule.Window,
 		threshold: rule.Threshold,
 		grouping:  compiledGrouping{field: rule.GroupBy, key: key, groups: make(map[GroupKey]*timestampWindow)},
 	}, nil
@@ -268,11 +272,52 @@ func (engine *Engine) ProcessWithMatch(event request.Event) ([]Evaluation, bool,
 				RuleID: rule.id, LogSource: rule.logSource, RuleRevision: rule.revision, GroupField: grouping.field,
 				GroupValue: value, GroupKey: key, EventTimestamp: event.Timestamp,
 				Count: count, Window: rule.window, Threshold: rule.threshold, DryRun: true,
+				Reason: rule.detectionReason(event),
 			}
 		}
 		evaluations = append(evaluations, evaluation)
 	}
 	return evaluations, matched, nil
+}
+
+func (rule *compiledRule) detectionReason(event request.Event) string {
+	switch rule.ruleType {
+	case "signature":
+		if rule.queryRegex != nil {
+			matched := rule.queryRegex.FindString(event.RawQuery)
+			if matched == "" {
+				matched = event.RawQuery
+			}
+			if decoded, err := url.QueryUnescape(matched); err == nil {
+				matched = decoded
+			}
+			if strings.Contains(strings.ToLower(rule.id), "sqli") {
+				return fmt.Sprintf("SQLi-сигнатура в query: %s", matched)
+			}
+			return fmt.Sprintf("Сигнатура в query: %s", matched)
+		}
+		matched := rule.pathRegex.FindString(event.Path)
+		if matched == "" {
+			matched = event.Path
+		}
+		return fmt.Sprintf("Сигнатура в URL: %s", matched)
+	case "cardinality":
+		if rule.uniqueBy == "destination_port" {
+			return "Обнаружен перебор разных портов"
+		}
+		return "Обнаружен перебор разных URL"
+	default:
+		switch event.Method {
+		case "SSH":
+			return "Серия неудачных попыток входа по SSH"
+		case "NGINX_ERROR":
+			return "Серия ошибок аутентификации Nginx"
+		case "GET":
+			return "Частота HTTP-запросов превысила порог"
+		default:
+			return "Частота событий превысила порог"
+		}
+	}
 }
 
 func (engine *Engine) IsIgnored(event request.Event) bool {

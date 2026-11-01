@@ -33,6 +33,7 @@ type Options struct {
 	StartPosition     StartPosition
 	ReconcileInterval time.Duration
 	RotationGrace     time.Duration
+	Once              bool
 }
 
 // Line ties a raw log record to the configured source that produced it.
@@ -64,6 +65,7 @@ type Follower struct {
 	watcher           *fsnotify.Watcher
 	active            *logStream
 	draining          []*drainingStream
+	once              bool
 }
 
 func Open(options Options, logger *slog.Logger) (*Follower, error) {
@@ -93,6 +95,7 @@ func Open(options Options, logger *slog.Logger) (*Follower, error) {
 		path:              filepath.Clean(options.Path),
 		reconcileInterval: options.ReconcileInterval,
 		rotationGrace:     options.RotationGrace,
+		once:              options.Once,
 		logger:            logger,
 		watcher:           watcher,
 	}
@@ -123,6 +126,9 @@ func (f *Follower) Run(ctx context.Context, lines chan<- Line) error {
 			return nil
 		}
 		return err
+	}
+	if f.once {
+		return nil
 	}
 
 	ticker := time.NewTicker(f.reconcileInterval)

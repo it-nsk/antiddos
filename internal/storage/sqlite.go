@@ -108,6 +108,10 @@ func (store *Store) createSchema(ctx context.Context) error {
 		trigger_user_agent TEXT NOT NULL,
 		method TEXT NOT NULL DEFAULT '',
 		path TEXT NOT NULL DEFAULT '',
+		raw_query TEXT NOT NULL DEFAULT '',
+		protocol TEXT NOT NULL DEFAULT '',
+		raw_event TEXT NOT NULL DEFAULT '',
+		reason TEXT NOT NULL DEFAULT '',
 		status INTEGER NOT NULL DEFAULT 0,
 		request_count INTEGER NOT NULL CHECK (request_count > 0),
 			window_millis INTEGER NOT NULL CHECK (window_millis > 0),
@@ -158,6 +162,10 @@ func (store *Store) createSchema(ctx context.Context) error {
 	for _, column := range []struct{ name, definition string }{
 		{"method", `TEXT NOT NULL DEFAULT ''`},
 		{"path", `TEXT NOT NULL DEFAULT ''`},
+		{"raw_query", `TEXT NOT NULL DEFAULT ''`},
+		{"protocol", `TEXT NOT NULL DEFAULT ''`},
+		{"raw_event", `TEXT NOT NULL DEFAULT ''`},
+		{"reason", `TEXT NOT NULL DEFAULT ''`},
 		{"status", `INTEGER NOT NULL DEFAULT 0`},
 	} {
 		if err := store.addColumnIfMissing(ctx, "detections", column.name, column.definition); err != nil {
@@ -332,6 +340,13 @@ func (store *Store) migrateDetections(ctx context.Context) error {
 		group_values_json TEXT NOT NULL,
 		trigger_ip TEXT NOT NULL,
 		trigger_user_agent TEXT NOT NULL,
+		method TEXT NOT NULL DEFAULT '',
+		path TEXT NOT NULL DEFAULT '',
+		raw_query TEXT NOT NULL DEFAULT '',
+		protocol TEXT NOT NULL DEFAULT '',
+		raw_event TEXT NOT NULL DEFAULT '',
+		reason TEXT NOT NULL DEFAULT '',
+		status INTEGER NOT NULL DEFAULT 0,
 		request_count INTEGER NOT NULL CHECK (request_count > 0),
 			window_millis INTEGER NOT NULL CHECK (window_millis > 0),
 			threshold INTEGER NOT NULL CHECK (threshold > 0),
@@ -341,6 +356,7 @@ func (store *Store) migrateDetections(ctx context.Context) error {
 	}
 	const persistedColumns = `id, log_source, event_time_unix_ns, event_time_text, recorded_at_unix_ms,
 		rule_id, grouping_id, group_values_json, trigger_ip, trigger_user_agent,
+		method, path, raw_query, protocol, raw_event, reason, status,
 		request_count, window_millis, threshold, dry_run`
 	if _, err := tx.ExecContext(ctx, `INSERT INTO detections_new (`+persistedColumns+`) SELECT `+persistedColumns+` FROM detections`); err != nil {
 		return fmt.Errorf("copy detections into migrated table: %w", err)
@@ -422,9 +438,9 @@ func (store *Store) RecordDetection(ctx context.Context, detection engine.Detect
 	_, err = store.db.ExecContext(ctx, `INSERT INTO detections (
 		log_source, event_time_unix_ns, event_time_text, recorded_at_unix_ms,
 		rule_id, grouping_id, group_values_json,
-		trigger_ip, trigger_user_agent, method, path, status, request_count, window_millis,
+		trigger_ip, trigger_user_agent, method, path, raw_query, protocol, raw_event, reason, status, request_count, window_millis,
 		threshold, dry_run
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		detection.LogSource,
 		event.Timestamp.UnixNano(),
 		event.Timestamp.Format(time.RFC3339Nano),
@@ -436,6 +452,10 @@ func (store *Store) RecordDetection(ctx context.Context, detection engine.Detect
 		event.UserAgent,
 		event.Method,
 		event.Path,
+		event.RawQuery,
+		event.Protocol,
+		event.RawLine,
+		detection.Reason,
 		event.Status,
 		detection.Count,
 		detection.Window.Milliseconds(),

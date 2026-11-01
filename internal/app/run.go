@@ -33,11 +33,11 @@ const lineBufferSize = 256
 
 // RunOptions contains command-line choices parsed by cmd/antiddos.
 type RunOptions struct {
-	Config, LogFile                    string
-	ControlSocketPath, WebSocketPath   string
-	FromStart, PrintLines, PrintEvents bool
-	SoftFeedSocketPath                 string
-	SoftFeedSocketGroupID              *int
+	Config, LogFile                          string
+	ControlSocketPath, WebSocketPath         string
+	FromStart, Once, PrintLines, PrintEvents bool
+	SoftFeedSocketPath                       string
+	SoftFeedSocketGroupID                    *int
 }
 
 func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
@@ -66,7 +66,7 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 			continue
 		}
 		rule := engine.Rule{
-			ID: configuredRule.ID, Disabled: configuredRule.ExplicitlyDisabled, LogSource: configuredRule.LogSource, IgnoreIPs: configuredRule.IgnoreIPs,
+			ID: configuredRule.ID, Type: configuredRule.Type, Disabled: configuredRule.ExplicitlyDisabled, LogSource: configuredRule.LogSource, IgnoreIPs: configuredRule.IgnoreIPs,
 			PathRegex:  configuredRule.PathRegex,
 			QueryRegex: configuredRule.QueryRegex, Statuses: configuredRule.Statuses, UniqueBy: configuredRule.UniqueBy,
 			Window: configuredRule.Window, Threshold: configuredRule.Threshold,
@@ -259,7 +259,7 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 		}
 		follower, err := reader.Open(reader.Options{
 			Source: source.ID, Path: source.Path,
-			StartPosition: reader.StartPosition(cfg.StartPosition),
+			StartPosition: reader.StartPosition(cfg.StartPosition), Once: opts.Once,
 		}, logger)
 		if err != nil {
 			for _, opened := range followers {
@@ -438,6 +438,7 @@ readLoop:
 				}
 				continue
 			}
+			event.RawLine = line.Text
 			statistics.parsedRequests++
 			ruleEngine := ruleEngines[line.Source]
 			if opts.PrintEvents {

@@ -577,6 +577,9 @@ func parseRule(raw rawRuleConfig) (RuleConfig, error) {
 	if ruleType == "cardinality" && raw.UniqueBy != "path" && raw.UniqueBy != "destination_port" {
 		return RuleConfig{}, fmt.Errorf("cardinality rules require unique_by path or destination_port")
 	}
+	if ruleType != "cardinality" {
+		raw.UniqueBy = ""
+	}
 	if !supportedGroupField(*raw.GroupBy) {
 		return RuleConfig{}, fmt.Errorf("unsupported group_by %q", *raw.GroupBy)
 	}

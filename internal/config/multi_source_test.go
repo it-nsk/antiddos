@@ -48,11 +48,11 @@ func TestDecodeLegacySingleLogRemainsCompatible(t *testing.T) {
 }
 
 func TestDecodeRuleTypes(t *testing.T) {
-	cfg, err := decode(strings.NewReader(`{"log_file":"/tmp/access.log","engine":{"rules":[{"id":"probe","type":"signature","path_regex":"^/\\.env$","window":"1s","threshold":1,"group_by":"ip"}]}}`), "test", "")
+	cfg, err := decode(strings.NewReader(`{"log_file":"/tmp/access.log","engine":{"rules":[{"id":"probe","type":"signature","unique_by":"path","path_regex":"^/\\.env$","window":"1s","threshold":1,"group_by":"ip"}]}}`), "test", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := cfg.Engine.Rules[0]; got.Type != "signature" || got.Threshold != 1 || got.Window != time.Second {
+	if got := cfg.Engine.Rules[0]; got.Type != "signature" || got.Threshold != 1 || got.Window != time.Second || got.UniqueBy != "" {
 		t.Fatalf("signature rule = %#v", got)
 	}
 }

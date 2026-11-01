@@ -1,0 +1,46 @@
+.detections-table td {
+  vertical-align: top;
+}
+
+.detections-table .detection-reason {
+  min-width: 280px;
+  max-width: 420px;
+  white-space: normal;
+  line-height: 1.5;
+  color: #8a4b16;
+}
+
+.detections-table .detection-event {
+  min-width: 420px;
+  max-width: 720px;
+  white-space: normal;
+}
+
+.detection-event > code {
+  display: block;
+  padding: 7px 9px;
+  border: 1px solid #e3e8f0;
+  border-radius: 5px;
+  background: #f7f9fc;
+  color: #263852;
+  overflow-wrap: anywhere;
+}
+
+.detection-event details {
+  margin-top: 7px;
+}
+
+.detection-event details summary {
+  padding: 0;
+  color: #60718d;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.detection-event details code {
+  display: block;
+  margin-top: 6px;
+  color: #58677d;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

@@ -133,7 +133,7 @@ func launch(ctx context.Context, args []string, logger *slog.Logger) error {
 		Config: options.Config, LogFile: options.LogFile,
 		ControlSocketPath: control.DefaultSocketPath,
 		WebSocketPath:     webcontrol.DefaultSocketPath,
-		FromStart:         options.FromStart, PrintLines: options.PrintLines, PrintEvents: options.PrintEvents,
+		FromStart:         options.FromStart, Once: options.Once, PrintLines: options.PrintLines, PrintEvents: options.PrintEvents,
 	}, logger)
 }
 
@@ -175,7 +175,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	}
 	return app.Run(ctx, app.RunOptions{
 		Config: options.Config, LogFile: options.LogFile, ControlSocketPath: options.ControlSocket, WebSocketPath: options.WebSocket,
-		FromStart: options.FromStart, PrintLines: options.PrintLines, PrintEvents: options.PrintEvents,
+		FromStart: options.FromStart, Once: options.Once, PrintLines: options.PrintLines, PrintEvents: options.PrintEvents,
 		SoftFeedSocketPath: options.SoftFeedSocket, SoftFeedSocketGroupID: softFeedGroupID,
 	}, logger)
 }
@@ -228,7 +228,7 @@ func challengeCommand(ctx context.Context, args []string, logger *slog.Logger, o
 type runOptions struct {
 	Config, LogFile, ControlSocket, WebSocket string
 	SoftFeedSocket, SoftFeedGroup             string
-	FromStart, PrintLines, PrintEvents        bool
+	FromStart, Once, PrintLines, PrintEvents  bool
 }
 
 func parseRunFlags(args []string, out io.Writer) (runOptions, error) {
@@ -245,6 +245,7 @@ func parseRunFlags(args []string, out io.Writer) (runOptions, error) {
 	f.StringVar(&o.Config, "config", o.Config, "configuration file")
 	f.StringVar(&o.LogFile, "log-file", o.LogFile, "override log_file")
 	f.BoolVar(&o.FromStart, "from-start", false, "read the existing log from the beginning")
+	f.BoolVar(&o.Once, "once", false, "process currently available log lines and exit")
 	f.BoolVar(&o.PrintLines, "print-lines", false, "print input lines for debugging")
 	f.BoolVar(&o.PrintEvents, "print-events", false, "print parsed events for debugging")
 	if err := f.Parse(args); err != nil {

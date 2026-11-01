@@ -184,7 +184,8 @@ test('live multi-source traffic, rule matching, graphs and pagination',async({pa
  const before=await (await page.request.get(endpoint)).json();
  const sum=(points:any[])=>points.reduce((total,p)=>total+p.requests,0);
  const lines=(ip:string,path:string)=>Array.from({length:6},(_,i)=>{const d=new Date(now.getTime()+10000+i*500);const stamp=`${String(d.getUTCDate()).padStart(2,'0')}/${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]}/${d.getFullYear()}:${d.toISOString().slice(11,19)} +0000`;return `${ip} - - [${stamp}] "GET ${path} HTTP/1.1" 200 256 "-" "web-live-check"\n`}).join('');
- appendFileSync(config.log_sources.main,lines('192.0.2.50','/landing')+lines('192.0.2.10','/landing')+lines('192.0.2.60','/'));
+ const homepagePath=config.engine.rules.find((rule:any)=>rule.id==='homepage').path_regex==='^/$'?'/?probe=full-request':'/landing?probe=full-request';
+ appendFileSync(config.log_sources.main,lines('192.0.2.50',homepagePath)+lines('192.0.2.10','/landing')+lines('192.0.2.60','/'));
  appendFileSync(config.log_sources.admin,lines('198.51.100.50','/login')+lines('198.51.100.7','/login'));
  await expect.poll(async()=>sum((await (await page.request.get(endpoint)).json()).points),{timeout:45000}).toBe(sum(before.points)+30);
  const after=await (await page.request.get(endpoint)).json();
@@ -193,10 +194,19 @@ test('live multi-source traffic, rule matching, graphs and pagination',async({pa
   const next=after.source_points.find((s:any)=>s.source_id===source).points;
   expect(sum(next)).toBe(sum(previous)+added);
   const sumMatched=(points:any[])=>points.reduce((total,p)=>total+p.matched,0);
-  const expectedMatches=source==='admin'?12:config.engine.rules.find((rule:any)=>rule.id==='homepage').path_regex==='^/$'?6:12;
+  const expectedMatches=12;
   expect(sumMatched(next)).toBe(sumMatched(previous)+expectedMatches);
  }
  expect(after.block_count).toBe(0);
+ // The fixture writes event timestamps 10–12.5 seconds ahead of wall clock so
+ // they are never rejected as late after the seeded stream. Wait until the
+ // live dashboard range includes them before asserting their rendered detail.
+ await page.waitForTimeout(13000);
+ await page.getByLabel('Сейчас',{exact:true}).check();
+ await page.getByRole('button',{name:'Обновить',exact:true}).click();
+ await expect(page.getByRole('columnheader',{name:'Причина срабатывания',exact:true})).toBeVisible();
+ await expect(page.getByText(`GET ${homepagePath} HTTP/1.1`,{exact:true}).first()).toBeVisible({timeout:15000});
+ await expect(page.locator('.detection-reason').first()).toContainText(/Частота HTTP-запросов превысила порог/);
  await page.getByRole('button',{name:/Обзор трафика/}).click();
  await page.getByRole('button',{name:'Обновить',exact:true}).click();
  await page.screenshot({path:`${artifact}/live-dashboard.png`,fullPage:true});
