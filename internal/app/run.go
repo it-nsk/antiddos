@@ -46,7 +46,7 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 		return err
 	}
 	switch cfg.BlockMode {
-	case config.BlockModeDryRun, config.BlockModeNFTables, config.BlockModeSoftBlock, config.BlockModeHybrid:
+	case config.BlockModeDryRun, config.BlockModeNFTables, config.BlockModeIPTables, config.BlockModeSoftBlock, config.BlockModeHybrid:
 	default:
 		return fmt.Errorf("unsupported block_mode %q", cfg.BlockMode)
 	}
@@ -113,8 +113,22 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 		return fmt.Errorf("initialize block policy: %w", err)
 	}
 	var blockAction action.Action = action.DryRun{}
-	if config.UsesNFTables(cfg) {
-		blockAction = &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}
+	if config.UsesFirewall(cfg) {
+		backends := make(map[string]action.Action, 2)
+		all := make([]action.Action, 0, 2)
+		if config.UsesNFTables(cfg) {
+			backend := &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}
+			backends[config.RuleActionNFTables], all = backend, append(all, backend)
+		}
+		if config.UsesIPTables(cfg) {
+			backend := &action.IPTables{BlockTCPPorts: cfg.BlockTCPPorts}
+			backends[config.RuleActionIPTables], all = backend, append(all, backend)
+		}
+		byRule := make(map[string]action.Action, len(ruleActions))
+		for ruleID, actionName := range ruleActions {
+			byRule[ruleID] = backends[actionName]
+		}
+		blockAction = action.Router{ByRule: byRule, All: all}
 	}
 	analysisConfigID := engine.AnalysisConfigID(revisions)
 	database, err := storage.Open(cfg.DatabasePath)
@@ -133,9 +147,9 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 	if err := manager.Cleanup(ctx, time.Now()); err != nil {
 		return fmt.Errorf("prune expired block records: %w", err)
 	}
-	if config.UsesNFTables(cfg) {
+	if config.UsesFirewall(cfg) {
 		if err := manager.Restore(ctx, func(ip netip.Addr, ruleID string) bool {
-			if ruleActions[ruleID] != config.RuleActionNFTables {
+			if ruleActions[ruleID] != config.RuleActionNFTables && ruleActions[ruleID] != config.RuleActionIPTables {
 				return true
 			}
 			source := ruleSource[ruleID]
@@ -219,7 +233,7 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 			<-localErrors
 		}
 	}()
-	if config.UsesNFTables(cfg) && opts.ControlSocketPath != "" {
+	if config.UsesFirewall(cfg) && opts.ControlSocketPath != "" {
 		localServers++
 		go func() {
 			localErrors <- control.Serve(localCtx, opts.ControlSocketPath, manager)
@@ -400,7 +414,7 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 				if err != nil {
 					logger.Error("persist soft-block decision", "rule", detection.RuleID, "error", err)
 				}
-			} else if actionName == config.RuleActionNFTables || cfg.BlockMode == config.BlockModeDryRun {
+			} else if actionName == config.RuleActionNFTables || actionName == config.RuleActionIPTables || cfg.BlockMode == config.BlockModeDryRun {
 				result, err := manager.Process(ctx, *evaluation.Detection, time.Now())
 				logBlockResult(logger, result, cfg.BlockMode == config.BlockModeDryRun)
 				if err != nil {

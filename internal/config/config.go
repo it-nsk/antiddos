@@ -23,6 +23,7 @@ const DefaultBlockDuration = 5 * time.Minute
 const (
 	BlockModeDryRun    = "dry_run"
 	BlockModeNFTables  = "nftables"
+	BlockModeIPTables  = "iptables"
 	BlockModeSoftBlock = "soft_block"
 	BlockModeHybrid    = "hybrid"
 )
@@ -30,6 +31,7 @@ const (
 const (
 	RuleActionDryRun    = "dry_run"
 	RuleActionNFTables  = "nftables"
+	RuleActionIPTables  = "iptables"
 	RuleActionSoftBlock = "soft_block"
 )
 
@@ -108,6 +110,8 @@ func EffectiveRuleAction(mode string, rule RuleConfig) string {
 	switch mode {
 	case BlockModeNFTables:
 		return RuleActionNFTables
+	case BlockModeIPTables:
+		return RuleActionIPTables
 	case BlockModeSoftBlock:
 		return RuleActionSoftBlock
 	case BlockModeHybrid:
@@ -134,6 +138,20 @@ func UsesNFTables(cfg Config) bool {
 	}
 	return false
 }
+
+// UsesIPTables reports whether an effective rule needs the iptables/ipset
+// backend. Keeping this separate from UsesNFTables makes the capability and
+// lifecycle decisions explicit at the composition boundary.
+func UsesIPTables(cfg Config) bool {
+	for _, rule := range cfg.Engine.Rules {
+		if EffectiveRuleAction(cfg.BlockMode, rule) == RuleActionIPTables {
+			return true
+		}
+	}
+	return false
+}
+
+func UsesFirewall(cfg Config) bool { return UsesNFTables(cfg) || UsesIPTables(cfg) }
 
 type rawConfig struct {
 	LogFile       string                     `json:"log_file"`
@@ -233,7 +251,7 @@ func decode(input io.Reader, path, logFile string) (Config, error) {
 	if blockMode == "" {
 		blockMode = DefaultBlockMode
 	}
-	if blockMode != BlockModeDryRun && blockMode != BlockModeNFTables && blockMode != BlockModeSoftBlock && blockMode != BlockModeHybrid {
+	if blockMode != BlockModeDryRun && blockMode != BlockModeNFTables && blockMode != BlockModeIPTables && blockMode != BlockModeSoftBlock && blockMode != BlockModeHybrid {
 		return Config{}, fmt.Errorf("config %q: unsupported block_mode %q", path, blockMode)
 	}
 	if err := validateRuleActions(blockMode, engineConfig); err != nil {
@@ -603,11 +621,11 @@ func validateRuleActions(mode string, engine EngineConfig) error {
 		if mode == BlockModeHybrid && action == "" {
 			return fmt.Errorf("engine.rules[%d]: action is required in hybrid mode", index)
 		}
-		if action != "" && action != RuleActionDryRun && action != RuleActionSoftBlock && action != RuleActionNFTables {
+		if action != "" && action != RuleActionDryRun && action != RuleActionSoftBlock && action != RuleActionNFTables && action != RuleActionIPTables {
 			return fmt.Errorf("engine.rules[%d]: unsupported action %q", index, action)
 		}
 		effective := EffectiveRuleAction(mode, rule)
-		if (effective == RuleActionSoftBlock || effective == RuleActionNFTables) && rule.GroupBy != "ip" {
+		if (effective == RuleActionSoftBlock || effective == RuleActionNFTables || effective == RuleActionIPTables) && rule.GroupBy != "ip" {
 			return fmt.Errorf("engine.rules[%d]: effective action %q requires group_by %q", index, effective, "ip")
 		}
 	}

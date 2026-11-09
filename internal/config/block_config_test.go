@@ -29,6 +29,21 @@ func TestDecodeBlockSettingsAcceptNFTablesAndMinuteDuration(t *testing.T) {
 	}
 }
 
+func TestIPTablesModeAndHybridAction(t *testing.T) {
+	for _, document := range []string{
+		`{"log_file":"/tmp/access.log","block_mode":"iptables","engine":{"rules":[{"id":"hard","path_regex":"^/$","window":"5s","threshold":5,"group_by":"ip"}]}}`,
+		`{"log_file":"/tmp/access.log","block_mode":"hybrid","engine":{"rules":[{"id":"hard","action":"iptables","path_regex":"^/$","window":"5s","threshold":5,"group_by":"ip"}]}}`,
+	} {
+		cfg, err := decode(strings.NewReader(document), "test", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !UsesIPTables(cfg) || !UsesFirewall(cfg) {
+			t.Fatalf("iptables backend not selected: %#v", cfg)
+		}
+	}
+}
+
 func TestSoftBlockConfigRequiresValidSiteSourceAndOriginMarker(t *testing.T) {
 	document := `{"log_sources":{"web":{"path":"/tmp/web.log","format":"nginx_custom","log_format":"$remote_addr [$time_local] \"$request\" $status $antiddos_response_origin"}},"database_path":"/tmp/db.sqlite","block_mode":"soft_block","soft_block":{"cookie_ttl":"30m","sites":{"main":{"hosts":["example.test"],"log_sources":["web"]}}},"engine":{"rules":[{"id":"r","log_source":"web","path_regex":"^/$","window":"5s","threshold":5,"group_by":"ip"}]}}`
 	cfg, err := decode(strings.NewReader(document), "test", "")

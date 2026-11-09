@@ -1,6 +1,6 @@
 # antiddos
 
-Linux service that analyzes Nginx access logs, records traffic and detections in SQLite, and can temporarily block client IPs through nftables.
+Linux service that analyzes Nginx access logs, records traffic and detections in SQLite, and can temporarily block client IPs through nftables or iptables+ipset.
 
 ## Quick start: чистый Ubuntu-сервер, SSH и dry-run
 
@@ -133,6 +133,22 @@ log_format main '$remote_addr [$time_local] "$request" $status $body_bytes_sent'
 Для отката выберите в UI **Только наблюдение**, сохраните конфигурацию и снова
 перезапустите `antiddos`. Один адрес можно снять командой
 `sudo /usr/local/bin/antiddos unblock IP`.
+
+<a id="iptables-ipset-blocking-setup"></a>
+### Блокировки через iptables + ipset (CentOS 7)
+
+Для CentOS 7 используйте backend `iptables`: он требует `iptables`, `ip6tables`
+и `ipset` (пакеты обычно называются `iptables` и `ipset`). Сначала оставьте
+правила в `dry_run` на 24–72 часа и обязательно задайте
+`"block_tcp_ports": [80, 443]`, чтобы не заблокировать SSH или иной трафик
+хоста. Установите зависимости командой `sudo yum install -y iptables ipset`,
+затем установите `"block_mode": "iptables"` и перезапустите службу.
+
+AntiDDoS создаёт только свои sets `antiddos_blocked_ipv4` и
+`antiddos_blocked_ipv6`; адреса в них имеют TTL. В `INPUT` и `FORWARD` она
+добавляет только правила с комментарием `antiddos-managed`, не очищая чужие
+цепочки, правила или ipset. Перед включением всё равно проверьте реальный IP в
+Nginx и собственный firewall (`sudo iptables -S`, `sudo ipset list`).
 
 <a id="soft-block-captcha-setup"></a>
 ### Как подключить Soft-block CAPTCHA
@@ -475,15 +491,15 @@ After switching to `log_sources`, remove any active `ANTIDDOS_LOG_FILE` override
 
 ## Observe or block
 
-`dry_run` is the default: detections are recorded and logged, but nftables is unchanged. To enable real blocking, install `nftables`, set `block_mode` to `nftables`, and restart `antiddos`. `block_duration` accepts whole minutes from `1m` to `60m`. Repeated detections do not extend an active block.
+`dry_run` is the default: detections are recorded and logged, but the firewall is unchanged. To enable real blocking, install `nftables` and set `block_mode` to `nftables`, or install `iptables`/`ipset` and set it to `iptables` (the CentOS 7-compatible backend), then restart `antiddos`. `block_duration` accepts whole minutes from `1m` to `60m`. Repeated detections do not extend an active block.
 
-`hybrid` gives every rule an independent `action`: `dry_run`, `soft_block`, or `nftables`. A site can therefore use two enforcement levels, another log source can be observation-only, and a third can use only firewall blocking in the same daemon. Every hybrid rule must set `action`; hybrid does not require all action types to be present. `soft_block` and `nftables` require `group_by: "ip"`, while `dry_run` remains analytical and may use the other supported groupings. If soft and firewall rules both match, the firewall block takes practical precedence until it expires; their leases remain independent.
+`hybrid` gives every rule an independent `action`: `dry_run`, `soft_block`, `nftables`, or `iptables`. A site can therefore use two enforcement levels, another log source can be observation-only, and a third can use only firewall blocking in the same daemon. Every hybrid rule must set `action`; hybrid does not require all action types to be present. `soft_block`, `nftables`, and `iptables` require `group_by: "ip"`, while `dry_run` remains analytical and may use the other supported groupings. If soft and firewall rules both match, the firewall block takes practical precedence until it expires; their leases remain independent.
 
-Outside `hybrid`, the global mode overrides the stored rule actions without deleting them: `dry_run` observes every rule, `soft_block` challenges every IP-grouped rule, and `nftables` firewall-blocks every IP-grouped rule. Returning to `hybrid` restores the per-rule choices.
+Outside `hybrid`, the global mode overrides the stored rule actions without deleting them: `dry_run` observes every rule, `soft_block` challenges every IP-grouped rule, and `nftables` or `iptables` firewall-block every IP-grouped rule. Returning to `hybrid` restores the per-rule choices.
 
 `block_tcp_ports` limits blocking to TCP destination ports, for example `[80, 443]`. If omitted or empty, the address is blocked on all protocols and ports. For Docker traffic, the `forward` rule sees the container-side port after destination NAT. Blocking is server-wide, not limited to one Nginx site. Behind a proxy, make sure Nginx records the real client IP before enabling enforcement.
 
-The systemd unit grants `CAP_NET_ADMIN` (Linux permission to manage host networking) to the launcher. It is retained only when the effective rule actions include `nftables`; otherwise the launcher first removes any persisted old firewall leases and then drops the capability before starting the analyzer. AntiDDoS creates its own `inet antiddos` table and does not flush other nftables tables. An nftables action is selected by one site's log but blocks the client IP on the configured server ports, not only on that virtual host.
+The systemd unit grants `CAP_NET_ADMIN` (Linux permission to manage host networking) to the launcher. `iptables` additionally needs `CAP_NET_RAW` because its ipset matcher resolves a set through a raw IPv4 socket. `launch` retains only the capabilities required by the effective backend and drops both for observe/soft-block mode. On systemd before v229 (including stock CentOS 7), the installer selects a hardened legacy unit running as root because those releases cannot pass ambient capabilities to the unprivileged daemon; it keeps group `antiddos` so the web-control socket remains available to the local web service. AntiDDoS creates its own `inet antiddos` table and does not flush other nftables tables; the iptables backend uses only its named ipsets and tagged rules. A firewall action selected by one site's log blocks the client IP on the configured server ports, not only on that virtual host.
 
 <details>
 <summary>Monitor, unblock, and service commands</summary>
@@ -507,7 +523,7 @@ sudo systemctl start antiddos
 sudo systemctl restart antiddos
 ```
 
-`unblock` accepts one IPv4 or IPv6 address. The CLI asks the running daemon over `/run/antiddos/control.sock` to change nftables; the CLI itself has no firewall capability.
+`unblock` accepts one IPv4 or IPv6 address. The CLI asks the running daemon over `/run/antiddos/control.sock` to change the configured firewall backend; the CLI itself has no firewall capability.
 
 </details>
 

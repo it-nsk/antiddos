@@ -93,7 +93,7 @@ func TestReconcileRestoresRemainingLeaseAndRemovesWhitelistedIPs(t *testing.T) {
 	}
 }
 
-func TestReconcileDisabledNFTablesRemovesPersistedLeases(t *testing.T) {
+func TestReconcileDisabledFirewallsRemovesPersistedLeases(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.sqlite")
 	store, err := storage.Open(path)
 	if err != nil {
@@ -109,7 +109,7 @@ func TestReconcileDisabledNFTablesRemovesPersistedLeases(t *testing.T) {
 	}
 	recorder := &recordingAction{removeStatus: action.StatusRemoved}
 	cfg := config.Config{DatabasePath: path, BlockDuration: time.Minute, BlockMode: config.BlockModeHybrid, Engine: config.EngineConfig{Rules: []config.RuleConfig{{ID: "observe", Action: config.RuleActionDryRun}}}}
-	if err := ReconcileDisabledNFTables(context.Background(), cfg, recorder, nil); err != nil {
+	if err := ReconcileDisabledFirewalls(context.Background(), cfg, recorder, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(recorder.removedIPs) != 1 || recorder.removedIPs[0] != ip {

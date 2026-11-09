@@ -50,6 +50,7 @@ jobs:
           go build -trimpath -o "$package_dir/antiddos" ./cmd/antiddos
           install -m 0644 deploy/antiddos-web.service "$package_dir/antiddos-web.service"
           install -m 0644 deploy/antiddos.service "$package_dir/antiddos.service"
+          install -m 0644 deploy/antiddos-legacy.service "$package_dir/antiddos-legacy.service"
           install -m 0644 deploy/antiddos-challenge.service "$package_dir/antiddos-challenge.service"
           install -m 0644 deploy/antiddos-soft-block.conf "$package_dir/antiddos-soft-block.conf"
           install -m 0644 deploy/config.example.json "$package_dir/config.example.json"

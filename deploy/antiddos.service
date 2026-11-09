@@ -1,6 +1,6 @@
 [Unit]
 Description=AntiDDoS access log analyzer
-After=local-fs.target nftables.service
+After=local-fs.target nftables.service iptables.service
 
 [Service]
 Type=simple
@@ -13,10 +13,11 @@ Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=10s
 NoNewPrivileges=true
-# Effective nftables rules need host firewall access; launch otherwise drops it.
-# CAP_NET_ADMIN is broad network administration access, not set-specific.
-CapabilityBoundingSet=CAP_NET_ADMIN
-AmbientCapabilities=CAP_NET_ADMIN
+# nftables needs CAP_NET_ADMIN. The iptables set matcher also opens an IPv4
+# raw socket to resolve an ipset name, so it additionally needs CAP_NET_RAW.
+# launch drops each capability that the effective backend does not require.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 PrivateTmp=true
 PrivateDevices=true
 ProtectHome=true
@@ -28,7 +29,10 @@ ProtectControlGroups=true
 ProtectKernelLogs=true
 RestrictNamespaces=true
 RestrictSUIDSGID=true
-RestrictAddressFamilies=AF_UNIX AF_NETLINK
+# iptables/ipset's set matcher opens an IP socket while resolving the set.
+# Keep netlink control restricted, but permit the families required by both
+# nftables and the legacy iptables/ipset backend.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 StateDirectory=antiddos
 StateDirectoryMode=0700
 RuntimeDirectory=antiddos

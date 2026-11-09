@@ -1,0 +1,38 @@
+[Unit]
+Description=AntiDDoS access log analyzer (legacy systemd)
+After=local-fs.target iptables.service
+
+[Service]
+Type=simple
+# systemd before v229 cannot grant AmbientCapabilities to a non-root service.
+# Keep the daemon root only on those legacy systems; Group=antiddos preserves
+# access to the web-control socket for the antiddos-web account.
+User=root
+Group=antiddos
+Environment=ANTIDDOS_CONFIG=/etc/antiddos/config.json
+Environment=ANTIDDOS_LEGACY_SYSTEMD=1
+EnvironmentFile=-/etc/default/antiddos
+ExecStart=/usr/local/bin/antiddos launch
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/etc/antiddos
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+StateDirectory=antiddos
+StateDirectoryMode=0700
+RuntimeDirectory=antiddos
+RuntimeDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

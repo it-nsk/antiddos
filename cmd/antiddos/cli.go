@@ -92,9 +92,9 @@ func executeCommand(ctx context.Context, args []string, logger *slog.Logger, out
 	return err
 }
 
-// launch is the systemd entry point. It retains CAP_NET_ADMIN only when an
-// effective rule action uses nftables. Before dropping the capability it
-// removes leases left by a previously enabled firewall configuration.
+// launch is the systemd entry point. It retains only the capabilities required
+// by an effective firewall backend. Before dropping CAP_NET_ADMIN it removes
+// leases left by a previously enabled firewall configuration.
 func launch(ctx context.Context, args []string, logger *slog.Logger) error {
 	options, err := parseRunFlags(args, os.Stderr)
 	if err != nil {
@@ -107,8 +107,12 @@ func launch(ctx context.Context, args []string, logger *slog.Logger) error {
 	if _, err := blockpolicy.New(cfg.BlockDuration); err != nil {
 		return fmt.Errorf("validate block policy: %w", err)
 	}
-	if !config.UsesNFTables(cfg) {
-		if err := app.ReconcileDisabledNFTables(ctx, cfg, &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}, logger); err != nil {
+	if !config.UsesFirewall(cfg) {
+		cleanup := action.Router{All: []action.Action{
+			&action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts},
+			&action.IPTables{BlockTCPPorts: cfg.BlockTCPPorts},
+		}}
+		if err := app.ReconcileDisabledFirewalls(ctx, cfg, cleanup, logger); err != nil {
 			return err
 		}
 		setpriv, err := exec.LookPath("setpriv")
@@ -119,15 +123,40 @@ func launch(ctx context.Context, args []string, logger *slog.Logger) error {
 		if err != nil {
 			return fmt.Errorf("locate antiddos executable: %w", err)
 		}
-		childArgs := []string{setpriv, "--no-new-privs", "--inh-caps=-net_admin", "--ambient-caps=-net_admin", "--", binary, "run"}
+		childArgs := setprivDropArgs(setpriv, []string{"net_admin", "net_raw"})
+		childArgs = append(childArgs, "--", binary, "run")
 		childArgs = append(childArgs, args...)
 		childArgs = append(childArgs, "--control-socket", control.DefaultSocketPath)
 		childArgs = append(childArgs, "--web-socket", webcontrol.DefaultSocketPath)
 		return syscall.Exec(setpriv, childArgs, os.Environ())
 	}
-	nftables := &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}
-	if err := nftables.Initialize(ctx); err != nil {
-		return fmt.Errorf("initialize nftables blocking: %w", err)
+	if config.UsesNFTables(cfg) && !config.UsesIPTables(cfg) {
+		setpriv, err := exec.LookPath("setpriv")
+		if err != nil {
+			return fmt.Errorf("nftables startup requires util-linux setpriv to drop CAP_NET_RAW: %w", err)
+		}
+		binary, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("locate antiddos executable: %w", err)
+		}
+		childArgs := setprivDropArgs(setpriv, []string{"net_raw"})
+		childArgs = append(childArgs, "--", binary, "run")
+		childArgs = append(childArgs, args...)
+		childArgs = append(childArgs, "--control-socket", control.DefaultSocketPath)
+		childArgs = append(childArgs, "--web-socket", webcontrol.DefaultSocketPath)
+		return syscall.Exec(setpriv, childArgs, os.Environ())
+	}
+	if config.UsesNFTables(cfg) {
+		nftables := &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}
+		if err := nftables.Initialize(ctx); err != nil {
+			return fmt.Errorf("initialize nftables blocking: %w", err)
+		}
+	}
+	if config.UsesIPTables(cfg) {
+		iptables := &action.IPTables{BlockTCPPorts: cfg.BlockTCPPorts}
+		if err := iptables.Initialize(ctx); err != nil {
+			return fmt.Errorf("initialize iptables/ipset blocking: %w", err)
+		}
 	}
 	return app.Run(ctx, app.RunOptions{
 		Config: options.Config, LogFile: options.LogFile,
@@ -135,6 +164,18 @@ func launch(ctx context.Context, args []string, logger *slog.Logger) error {
 		WebSocketPath:     webcontrol.DefaultSocketPath,
 		FromStart:         options.FromStart, Once: options.Once, PrintLines: options.PrintLines, PrintEvents: options.PrintEvents,
 	}, logger)
+}
+
+// setprivDropArgs supports both service models. Modern systemd passes
+// capabilities through the ambient set. CentOS 7's systemd 219 cannot do
+// that, so its dedicated root unit uses the capability bounding set instead.
+func setprivDropArgs(setpriv string, capabilities []string) []string {
+	drops := "-" + strings.Join(capabilities, ",-")
+	args := []string{setpriv, "--no-new-privs", "--inh-caps=" + drops}
+	if os.Getenv("ANTIDDOS_LEGACY_SYSTEMD") == "1" {
+		return append(args, "--bounding-set="+drops)
+	}
+	return append(args, "--ambient-caps="+drops)
 }
 
 func unblock(ctx context.Context, args []string, out io.Writer) error {

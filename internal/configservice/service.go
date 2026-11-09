@@ -163,10 +163,10 @@ func (s *Service) Save(update Update) (Document, error) {
 		return Document{}, ErrConflict
 	}
 	if update.BlockMode != nil {
-		if *update.BlockMode != config.BlockModeDryRun && *update.BlockMode != config.BlockModeNFTables && *update.BlockMode != config.BlockModeSoftBlock && *update.BlockMode != config.BlockModeHybrid {
+		if *update.BlockMode != config.BlockModeDryRun && *update.BlockMode != config.BlockModeNFTables && *update.BlockMode != config.BlockModeIPTables && *update.BlockMode != config.BlockModeSoftBlock && *update.BlockMode != config.BlockModeHybrid {
 			return Document{}, fmt.Errorf("unsupported block_mode %q", *update.BlockMode)
 		}
-		if (*update.BlockMode == config.BlockModeNFTables || *update.BlockMode == config.BlockModeHybrid) && !update.ConfirmRealBlocks {
+		if (*update.BlockMode == config.BlockModeNFTables || *update.BlockMode == config.BlockModeIPTables || *update.BlockMode == config.BlockModeHybrid) && !update.ConfirmRealBlocks {
 			return Document{}, fmt.Errorf("switching to real firewall blocking requires explicit confirmation")
 		}
 	}
@@ -214,11 +214,11 @@ func (s *Service) Save(update Update) (Document, error) {
 		}
 		if ruleUpdate.Action != nil {
 			action := *ruleUpdate.Action
-			if action != "" && action != config.RuleActionDryRun && action != config.RuleActionSoftBlock && action != config.RuleActionNFTables {
+			if action != "" && action != config.RuleActionDryRun && action != config.RuleActionSoftBlock && action != config.RuleActionNFTables && action != config.RuleActionIPTables {
 				return Document{}, fmt.Errorf("unsupported action %q for rule %q", action, id)
 			}
 			for _, current := range cfg.Engine.Rules {
-				if current.ID == id && action == config.RuleActionNFTables && current.Action != action && !update.ConfirmRealBlocks {
+				if current.ID == id && (action == config.RuleActionNFTables || action == config.RuleActionIPTables) && current.Action != action && !update.ConfirmRealBlocks {
 					return Document{}, fmt.Errorf("switching a rule to real firewall blocking requires explicit confirmation")
 				}
 			}

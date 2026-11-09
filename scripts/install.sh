@@ -16,6 +16,7 @@ readonly config_dir="/etc/antiddos"
 readonly config_path="${config_dir}/config.json"
 readonly environment_path="/etc/default/antiddos"
 readonly unit_path="/etc/systemd/system/${service_name}"
+readonly legacy_unit_name="antiddos-legacy.service"
 readonly challenge_unit_path="/etc/systemd/system/${challenge_service_name}"
 readonly soft_block_dropin_dir="/etc/systemd/system/${service_name}.d"
 readonly soft_block_dropin_path="${soft_block_dropin_dir}/soft-block.conf"
@@ -35,6 +36,7 @@ disable_soft_block=0
 confirm_nginx_detached=0
 migrate_from_nftables=0
 use_local_build=0
+legacy_systemd=0
 web_admin_created=0
 web_admin_missing=0
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -163,10 +165,15 @@ if [[ "$release_version" != "latest" ]]; then
 fi
 
 for command in curl tar sha256sum install mktemp getent groupadd useradd usermod \
-    chown chmod systemctl runuser journalctl sed head tail stat dirname mv rm \
+    chown chmod systemctl runuser journalctl sed head tail stat dirname mv rm awk \
     sleep uname setpriv; do
     command -v "$command" >/dev/null || fail "required command is not installed: $command"
 done
+
+systemd_version="$(systemctl --version | awk 'NR == 1 { print $2 }')"
+if [[ "$systemd_version" =~ ^[0-9]+$ ]] && ((systemd_version < 229)); then
+    legacy_systemd=1
+fi
 
 if ((install_soft_block)); then
     command -v openssl >/dev/null || fail "required command is not installed: openssl"
@@ -201,11 +208,12 @@ fi
 if ((use_local_build)); then
     echo "[1/7] Using the local build from ${checkout_dir}"
     [[ -x "${checkout_dir}/antiddos" ]] || fail "local binary is missing; build it first with go build -o antiddos ./cmd/antiddos"
-    for payload in antiddos.service antiddos-web.service config.example.json config.security.example.json antiddos.env.example; do
+    for payload in antiddos.service antiddos-legacy.service antiddos-web.service config.example.json config.security.example.json antiddos.env.example; do
         [[ -f "${checkout_dir}/deploy/${payload}" ]] || fail "local checkout is missing deploy/${payload}"
     done
     install -m 0755 "${checkout_dir}/antiddos" "${build_dir}/antiddos"
     install -m 0644 "${checkout_dir}/deploy/antiddos.service" "${build_dir}/antiddos.service"
+    install -m 0644 "${checkout_dir}/deploy/antiddos-legacy.service" "${build_dir}/antiddos-legacy.service"
     install -m 0644 "${checkout_dir}/deploy/antiddos-web.service" "${build_dir}/antiddos-web.service"
     install -m 0644 "${checkout_dir}/deploy/config.example.json" "${build_dir}/config.example.json"
     install -m 0644 "${checkout_dir}/deploy/config.security.example.json" "${build_dir}/config.security.example.json"
@@ -231,7 +239,7 @@ else
     )
 fi
 
-for payload in antiddos antiddos.service config.example.json config.security.example.json antiddos.env.example; do
+for payload in antiddos antiddos.service antiddos-legacy.service config.example.json config.security.example.json antiddos.env.example; do
     [[ -f "${build_dir}/${payload}" ]] || fail "release archive is missing ${payload}"
 done
 if ((install_soft_block)); then
@@ -283,7 +291,12 @@ install -d -o "$service_user" -g "$service_group" -m 0700 "$state_dir"
 
 install -o root -g root -m 0755 "${build_dir}/antiddos" "${binary_path}.new"
 mv -f "${binary_path}.new" "$binary_path"
-install -o root -g root -m 0644 "${build_dir}/antiddos.service" "$unit_path"
+if ((legacy_systemd)); then
+    echo "      Using legacy systemd unit (systemd ${systemd_version}); firewall actions run as root"
+    install -o root -g root -m 0644 "${build_dir}/antiddos-legacy.service" "$unit_path"
+else
+    install -o root -g root -m 0644 "${build_dir}/antiddos.service" "$unit_path"
+fi
 
 if ((install_soft_block)); then
     install -d -o root -g root -m 0700 "$challenge_config_dir"
