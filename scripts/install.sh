@@ -208,12 +208,13 @@ fi
 if ((use_local_build)); then
     echo "[1/7] Using the local build from ${checkout_dir}"
     [[ -x "${checkout_dir}/antiddos" ]] || fail "local binary is missing; build it first with go build -o antiddos ./cmd/antiddos"
-    for payload in antiddos.service antiddos-legacy.service antiddos-web.service config.example.json config.security.example.json antiddos.env.example; do
+    for payload in antiddos.service antiddos-legacy.service antiddos-legacy-modules.conf antiddos-web.service config.example.json config.security.example.json antiddos.env.example; do
         [[ -f "${checkout_dir}/deploy/${payload}" ]] || fail "local checkout is missing deploy/${payload}"
     done
     install -m 0755 "${checkout_dir}/antiddos" "${build_dir}/antiddos"
     install -m 0644 "${checkout_dir}/deploy/antiddos.service" "${build_dir}/antiddos.service"
     install -m 0644 "${checkout_dir}/deploy/antiddos-legacy.service" "${build_dir}/antiddos-legacy.service"
+    install -m 0644 "${checkout_dir}/deploy/antiddos-legacy-modules.conf" "${build_dir}/antiddos-legacy-modules.conf"
     install -m 0644 "${checkout_dir}/deploy/antiddos-web.service" "${build_dir}/antiddos-web.service"
     install -m 0644 "${checkout_dir}/deploy/config.example.json" "${build_dir}/config.example.json"
     install -m 0644 "${checkout_dir}/deploy/config.security.example.json" "${build_dir}/config.security.example.json"
@@ -239,7 +240,7 @@ else
     )
 fi
 
-for payload in antiddos antiddos.service antiddos-legacy.service config.example.json config.security.example.json antiddos.env.example; do
+for payload in antiddos antiddos.service antiddos-legacy.service antiddos-legacy-modules.conf config.example.json config.security.example.json antiddos.env.example; do
     [[ -f "${build_dir}/${payload}" ]] || fail "release archive is missing ${payload}"
 done
 if ((install_soft_block)); then
@@ -288,12 +289,22 @@ fi
 echo "[3/7] Installing binary, unit, and configuration"
 install -d -o root -g "$service_group" -m 0750 "$config_dir"
 install -d -o "$service_user" -g "$service_group" -m 0700 "$state_dir"
+if ((legacy_systemd)); then
+    install -d -o root -g "$service_group" -m 0750 /run/antiddos
+fi
 
 install -o root -g root -m 0755 "${build_dir}/antiddos" "${binary_path}.new"
 mv -f "${binary_path}.new" "$binary_path"
 if ((legacy_systemd)); then
     echo "      Using legacy systemd unit (systemd ${systemd_version}); firewall actions run as root"
     install -o root -g root -m 0644 "${build_dir}/antiddos-legacy.service" "$unit_path"
+    install -d -m 0755 /etc/modules-load.d
+    install -o root -g root -m 0644 "${build_dir}/antiddos-legacy-modules.conf" /etc/modules-load.d/antiddos-legacy.conf
+    if command -v modprobe >/dev/null; then
+        for module in ip_tables iptable_filter ip6_tables ip6table_filter ip_set ip_set_hash_ip xt_set; do
+            modprobe "$module" || echo "WARNING: could not load kernel module ${module}; firewall backend may be unavailable" >&2
+        done
+    fi
 else
     install -o root -g root -m 0644 "${build_dir}/antiddos.service" "$unit_path"
 fi
@@ -436,8 +447,12 @@ if ! systemctl is-active --quiet "$service_name"; then
 fi
 
 monitor_ready=0
-for _ in {1..10}; do
-    if runuser -u "$service_user" -- "$binary_path" monitor --once >/dev/null 2>&1; then
+monitor_user="$service_user"
+if ((legacy_systemd)); then
+    monitor_user=root
+fi
+for _ in {1..30}; do
+    if runuser -u "$monitor_user" -- "$binary_path" monitor --once >/dev/null 2>&1; then
         monitor_ready=1
         break
     fi
@@ -499,7 +514,7 @@ echo
 echo "[7/7] Installation verified"
 echo "AntiDDoS"
 echo "  Service:  sudo systemctl status ${service_name}"
-echo "  Monitor:  sudo -u ${service_user} ${binary_path} monitor"
+echo "  Monitor:  sudo -u ${monitor_user} ${binary_path} monitor"
 echo "  Config:   ${config_path}"
 echo "  Database: ${state_dir}/antiddos.sqlite"
 echo "  Restart:  sudo systemctl restart ${service_name}"

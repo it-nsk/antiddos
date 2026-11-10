@@ -45,12 +45,15 @@ jobs:
           GOARCH: amd64
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
           package_dir="dist/package"
           mkdir -p "$package_dir"
-          go build -trimpath -o "$package_dir/antiddos" ./cmd/antiddos
+          CC=musl-gcc go build -trimpath -ldflags '-linkmode external -extldflags "-static"' -o "$package_dir/antiddos" ./cmd/antiddos
           install -m 0644 deploy/antiddos-web.service "$package_dir/antiddos-web.service"
           install -m 0644 deploy/antiddos.service "$package_dir/antiddos.service"
           install -m 0644 deploy/antiddos-legacy.service "$package_dir/antiddos-legacy.service"
+          install -m 0644 deploy/antiddos-legacy-modules.conf "$package_dir/antiddos-legacy-modules.conf"
           install -m 0644 deploy/antiddos-challenge.service "$package_dir/antiddos-challenge.service"
           install -m 0644 deploy/antiddos-soft-block.conf "$package_dir/antiddos-soft-block.conf"
           install -m 0644 deploy/config.example.json "$package_dir/config.example.json"
