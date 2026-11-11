@@ -7,7 +7,7 @@ Linux service that analyzes Nginx access logs, records traffic and detections in
 Первый запуск состоит из трёх действий. Сервер и Nginx перезапускать не нужно;
 после сохранения настроек перезапускается только `antiddos.service`.
 
-1. По SSH установить daemon и UI одной командой:
+1. На удалённом сервере по SSH установить daemon и UI одной командой:
 
 ```shell
 curl -fsSL https://raw.githubusercontent.com/it-nsk/antiddos/dev/scripts/install.sh -o /tmp/antiddos-install.sh && sudo bash /tmp/antiddos-install.sh --web
@@ -16,12 +16,22 @@ curl -fsSL https://raw.githubusercontent.com/it-nsk/antiddos/dev/scripts/install
 Установщик создаст системные сервисы, попросит пароль первого администратора и
 запустит безопасный режим `dry_run`.
 
-2. На рабочем компьютере открыть туннель и перейти на
-`http://127.0.0.1:8080`:
+2. На своём рабочем компьютере, не на сервере, открыть SSH-туннель и перейти
+на `http://127.0.0.1:8080`:
 
 ```shell
 ssh -N -L 8080:127.0.0.1:8080 <ssh-user>@<server-address>
 ```
+
+UI не доступен напрямую из интернета: открывайте его через SSH-туннель.
+Держите SSH-команду запущенной, пока работаете в UI. Если порт `8080` занят,
+выполните вместо предыдущей команды:
+
+```shell
+ssh -N -L 18080:127.0.0.1:8080 <ssh-user>@<server-address>
+```
+
+Затем откройте `http://127.0.0.1:18080`.
 
 В **Правила и фильтры → Источники логов → Добавить источник** указать имя,
 абсолютный путь и формат. Доступны Nginx access, Nginx error, OpenSSH auth.log и
@@ -417,6 +427,55 @@ directive into the matching source's `log_format` setting. AntiDDoS does not rea
 or modify `nginx.conf`.
 
 </details>
+
+## Архитектура решения
+
+```mermaid
+flowchart TB
+    Config["Config<br/>/etc/antiddos/config.json"]
+    Reader["Log reader<br/>читает строки журналов"]
+    Parser["Parser<br/>создаёт Event по строке лога"]
+    Event["Event<br/>IP, URL, статус, время, источник"]
+    Engine["Detection engine<br/>проверяет Event по правилам"]
+    Detection["Detection<br/>зафиксированное нарушение"]
+    Policy["Block policy<br/>whitelist, валидность IP, TTL"]
+    Manager["Block manager<br/>применяет блок, сохраняет lease,<br/>восстанавливает после перезапуска"]
+    Router["Action router<br/>выбирает backend для правила"]
+    NFT["NFTables"]
+    IPT["IPTables + IPSet"]
+    Soft["Soft-block<br/>CAPTCHA"]
+
+    Metrics["Metrics collector<br/>15-секундные срезы статистики"]
+    Store["SQLite Store<br/>запись и миграции"]
+    DB[("antiddos.sqlite")]
+    DBReader["SQLite Reader<br/>чтение для UI и monitor"]
+    Web["Web UI / monitor"]
+    ConfigService["Config service<br/>читает и изменяет конфиг"]
+
+    Config --> Reader
+    Config --> Engine
+    Reader --> Parser
+    Parser --> Event
+    Event --> Engine
+    Engine --> Detection
+    Detection --> Policy
+    Policy --> Manager
+    Manager --> Router
+    Router --> NFT
+    Router --> IPT
+    Router --> Soft
+
+    Event --> Metrics
+    Metrics --> Store
+    Engine --> Store
+    Manager --> Store
+    Store --> DB
+    DB --> DBReader
+    DBReader --> Web
+
+    Web --> ConfigService
+    ConfigService --> Config
+```
 
 ## Configuration
 
