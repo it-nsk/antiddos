@@ -72,7 +72,8 @@ func TestDashboardRangeAggregationPagination(t *testing.T) {
 	if len(large.Points) > 602 {
 		t.Fatal("unbounded points")
 	}
-	if _, err := reader.Dashboard(ctx, base, base.Add(32*24*time.Hour), 0, 100); err == nil {
-		t.Fatal("unbounded range")
+	long, err := reader.Dashboard(ctx, base, base.Add(730*24*time.Hour), 0, 100)
+	if err != nil || len(long.Points) > 602 {
+		t.Fatalf("historical range must remain bounded: points=%d err=%v", len(long.Points), err)
 	}
 }

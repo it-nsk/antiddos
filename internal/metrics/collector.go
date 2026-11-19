@@ -12,13 +12,17 @@ import (
 const SampleInterval = 15 * time.Second
 
 type Sample struct {
-	SourceID              string
-	BucketStartUnix       int64
-	IntervalSeconds       int64
-	Requests              int64
-	MatchedRequests       int64
-	ResponseBytes         int64
-	KnownResponseByteRows int64
+	SourceID                string
+	BucketStartUnix         int64
+	IntervalSeconds         int64
+	Requests                int64
+	MatchedRequests         int64
+	ResponseBytes           int64
+	KnownResponseByteRows   int64
+	ResponseTimeMinMillis   int64
+	ResponseTimeMaxMillis   int64
+	ResponseTimeTotalMillis int64
+	ResponseTimeRows        int64
 }
 
 type SampleWriter interface {
@@ -53,6 +57,17 @@ func (collector *Collector) Add(sourceID string, event request.Event, matched bo
 	if event.ResponseBytes != nil {
 		sample.ResponseBytes += *event.ResponseBytes
 		sample.KnownResponseByteRows++
+	}
+	if event.ResponseTimeMillis != nil {
+		v := *event.ResponseTimeMillis
+		if sample.ResponseTimeRows == 0 || v < sample.ResponseTimeMinMillis {
+			sample.ResponseTimeMinMillis = v
+		}
+		if v > sample.ResponseTimeMaxMillis {
+			sample.ResponseTimeMaxMillis = v
+		}
+		sample.ResponseTimeTotalMillis += v
+		sample.ResponseTimeRows++
 	}
 	collector.samples[key] = sample
 }

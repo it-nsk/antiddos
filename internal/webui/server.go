@@ -14,6 +14,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,7 +33,12 @@ var assets embed.FS
 
 const cookieName = "antiddos_session"
 
-type Options struct{ Listen, Origin, UsersDB, DaemonSocket string }
+type Options struct {
+	Listen, Origin, UsersDB, DaemonSocket, HistoryConfig, HistoryOutputDir, HistoryWorkDir string
+	HistoryRoots                                                                           []string
+	HistoryPublish                                                                         bool
+	HistoryNice, HistoryIOPriority                                                         int
+}
 
 type Backend interface {
 	Dashboard(context.Context, time.Time, time.Time, int64, int) (storage.Dashboard, error)
@@ -51,6 +58,7 @@ type Server struct {
 	loginSlots chan struct{}
 	mu         sync.Mutex
 	attempts   map[string]attempt
+	history    *historyJobs
 }
 type attempt struct {
 	count int
@@ -81,7 +89,29 @@ func New(o Options, auth *webauth.Store, backend Backend, logger *slog.Logger) (
 		return nil, err
 	}
 	origin, _ := url.Parse(o.Origin)
-	s := &Server{auth: auth, backend: backend, logger: logger, origin: origin, loginSlots: make(chan struct{}, 2), attempts: map[string]attempt{}}
+	if o.HistoryConfig != "" && o.HistoryWorkDir == "" {
+		return nil, fmt.Errorf("managed history requires --history-work-dir")
+	}
+	jobs, err := newHistoryJobs(o.HistoryConfig, o.HistoryOutputDir, o.HistoryRoots, o.HistoryPublish)
+	if err != nil {
+		return nil, err
+	}
+	if jobs != nil {
+		workDir := filepath.Clean(o.HistoryWorkDir)
+		if !filepath.IsAbs(workDir) {
+			return nil, fmt.Errorf("history work directory must be absolute")
+		}
+		if err := os.MkdirAll(workDir, 0o700); err != nil {
+			return nil, err
+		}
+		resolved, err := filepath.EvalSymlinks(workDir)
+		if err != nil || resolved != workDir {
+			return nil, fmt.Errorf("history work directory must not traverse symlinks: %v", err)
+		}
+		jobs.workDir = workDir
+		jobs.nice, jobs.ioPriority = o.HistoryNice, o.HistoryIOPriority
+	}
+	s := &Server{auth: auth, backend: backend, logger: logger, origin: origin, loginSlots: make(chan struct{}, 2), attempts: map[string]attempt{}, history: jobs}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("GET /api/session", s.protected(false, func(w http.ResponseWriter, r *http.Request, v webauth.Session) { writeJSON(w, 200, v) }))
@@ -93,6 +123,15 @@ func New(o Options, auth *webauth.Store, backend Backend, logger *slog.Logger) (
 	mux.HandleFunc("GET /api/config", s.protected(false, s.getConfig))
 	mux.HandleFunc("PUT /api/config/rules", s.protected(true, s.saveConfig))
 	mux.HandleFunc("GET /api/users", s.protected(true, s.users))
+	mux.HandleFunc("GET /api/history/jobs", s.protected(true, s.historyList))
+	mux.HandleFunc("GET /api/history/results", s.protected(true, s.historyResults))
+	mux.HandleFunc("POST /api/history/results/{name}/publish", s.protected(true, s.historyPublishResult))
+	mux.HandleFunc("GET /api/history/results/{name}/detections", s.protected(true, s.historyResultDetections))
+	mux.HandleFunc("POST /api/history/preview", s.protected(true, s.historyPreview))
+	mux.HandleFunc("POST /api/history/jobs", s.protected(true, s.historyStart))
+	mux.HandleFunc("POST /api/history/jobs/{id}/cancel", s.protected(true, s.historyCancel))
+	mux.HandleFunc("POST /api/history/jobs/{id}/publish", s.protected(true, s.historyPublish))
+	mux.HandleFunc("POST /api/history/rules/{id}/rewrite", s.protected(true, s.historyRewriteRule))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { fail(w, 404, "Endpoint not found") })
 	sub, _ := fs.Sub(assets, "assets")
 	files := http.FileServer(http.FS(sub))
@@ -185,6 +224,201 @@ func (s *Server) protected(admin bool, next func(http.ResponseWriter, *http.Requ
 		next(w, r, v)
 	}
 }
+
+func (s *Server) historyList(w http.ResponseWriter, _ *http.Request, _ webauth.Session) {
+	if s.history == nil {
+		fail(w, http.StatusNotFound, "Historical jobs are disabled; configure history roots and output directory")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.history.list())
+}
+func (s *Server) historyResults(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
+	if s.history == nil {
+		fail(w, http.StatusNotFound, "Historical results are disabled")
+		return
+	}
+	type result struct {
+		Name    string                         `json:"name"`
+		Imports []storage.HistoryImportSummary `json:"imports"`
+		Rules   []storage.HistoryRuleCount     `json:"rules"`
+	}
+	entries, err := os.ReadDir(s.history.outputDir)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	results := []result{}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".sqlite") || !entry.Type().IsRegular() {
+			continue
+		}
+		path := filepath.Join(s.history.outputDir, entry.Name())
+		reader, err := storage.OpenReader(path)
+		if err != nil {
+			continue
+		}
+		imports, importErr := reader.HistoryImports(r.Context())
+		rules, ruleErr := reader.HistoryRuleCounts(r.Context())
+		_ = reader.Close()
+		if importErr == nil && ruleErr == nil && len(imports) > 0 {
+			results = append(results, result{entry.Name(), imports, rules})
+		}
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+func (s *Server) historyPublishResult(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
+	if s.history == nil {
+		fail(w, http.StatusNotFound, "Historical results are disabled")
+		return
+	}
+	var request struct {
+		ImportID string `json:"import_id"`
+	}
+	if err := body(w, r, &request); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	result, err := s.history.publishResult(r.Context(), r.PathValue("name"), request.ImportID)
+	if err != nil {
+		fail(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+func (s *Server) historyResultDetections(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
+	if s.history == nil {
+		fail(w, http.StatusNotFound, "Historical results are disabled")
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" || filepath.Base(name) != name || filepath.Ext(name) != ".sqlite" {
+		fail(w, http.StatusBadRequest, "Invalid result name")
+		return
+	}
+	path := filepath.Join(s.history.outputDir, name)
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		fail(w, http.StatusNotFound, "Historical result not found")
+		return
+	}
+	before := int64(0)
+	if raw := r.URL.Query().Get("before"); raw != "" {
+		before, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || before < 0 {
+			fail(w, http.StatusBadRequest, "Invalid cursor")
+			return
+		}
+	}
+	reader, err := storage.OpenReader(path)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	defer reader.Close()
+	imports, err := reader.HistoryImports(r.Context())
+	if err != nil || len(imports) != 1 {
+		fail(w, http.StatusBadRequest, "Result must contain one import")
+		return
+	}
+	from := imports[0].FirstEvent.Unix() / 15 * 15
+	to := (imports[0].LastEvent.Unix()/15 + 1) * 15
+	data, err := reader.Dashboard(r.Context(), time.Unix(from, 0), time.Unix(to, 0), before, 100)
+	if err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, data)
+}
+
+func (s *Server) historyStart(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
+	if s.history == nil {
+		fail(w, http.StatusNotFound, "Historical jobs are disabled; configure history roots and output directory")
+		return
+	}
+	var request HistoryJobRequest
+	if err := body(w, r, &request); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	job, err := s.history.start(request)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (s *Server) historyPreview(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
+	if s.history == nil {
+		fail(w, http.StatusNotFound, "Historical jobs are disabled; configure history roots and output directory")
+		return
+	}
+	var request HistoryJobRequest
+	if err := body(w, r, &request); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	defer cancel()
+	preview, err := s.history.preview(ctx, request)
+	if err != nil {
+		// A browser cannot and must not elevate the web service.  Return an
+		// actionable operator diagnosis instead of suggesting that the UI can
+		// read a user's home directory or run sudo on their behalf.
+		if errors.Is(err, fs.ErrPermission) {
+			fail(w, http.StatusBadRequest, "Каталог архивов недоступен web-сервису. UI не выполняет sudo: скопируйте архивы в разрешённый history-root с правом чтения service user либо обратитесь к администратору. Для разовой проверки используйте CLI через sudo.")
+			return
+		}
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
+}
+
+func (s *Server) historyCancel(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
+	if s.history == nil {
+		fail(w, http.StatusNotFound, "Historical jobs are disabled; configure history roots and output directory")
+		return
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/history/jobs/"), "/cancel")
+	if id == "" {
+		fail(w, http.StatusNotFound, "Historical job not found")
+		return
+	}
+	if _, ok := s.history.get(id); !ok {
+		fail(w, http.StatusNotFound, "Historical job not found")
+		return
+	}
+	if !s.history.stop(id) {
+		fail(w, http.StatusConflict, "Historical job is not active")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancellation requested"})
+}
+func (s *Server) historyPublish(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
+	if s.history == nil {
+		fail(w, http.StatusNotFound, "Historical jobs are disabled")
+		return
+	}
+	job, err := s.history.publish(r.Context(), r.PathValue("id"))
+	if err != nil {
+		fail(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+func (s *Server) historyRewriteRule(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
+	if s.history == nil {
+		fail(w, http.StatusNotFound, "Historical jobs are disabled")
+		return
+	}
+	job, err := s.history.rewriteRule(r.PathValue("id"))
+	if err != nil {
+		fail(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, job)
+}
 func (s *Server) throttle(key string, limit int, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -273,17 +507,13 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, v webauth.Ses
 			*dst = n
 		}
 	}
-	if from < 0 || to <= from || to-from > 31*86400 || to > now+60 || before < 0 {
-		fail(w, 400, "Select a past period of at most 31 days")
+	if from < 0 || to <= from || to > now+60 || before < 0 {
+		fail(w, 400, "Select an ordered past period")
 		return
 	}
 	// Stored traffic resolution is 15 seconds; return the actual aligned bounds.
 	from = from / 15 * 15
 	to = (to + 14) / 15 * 15
-	if to-from > 31*86400 {
-		fail(w, 400, "Range exceeds 31 days")
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	data, err := s.backend.Dashboard(ctx, time.Unix(from, 0), time.Unix(to, 0), before, 100)

@@ -73,10 +73,13 @@ type SiteConfig struct {
 }
 
 type LogSourceConfig struct {
-	ID        string `json:"-"`
-	Path      string `json:"path"`
-	Format    string `json:"format"`
-	LogFormat string `json:"log_format"`
+	ID   string `json:"-"`
+	Path string `json:"path"`
+	// Paths are physical files belonging to this one logical source.  Path is
+	// retained as the primary path for old configurations and API clients.
+	Paths     []string `json:"paths,omitempty"`
+	Format    string   `json:"format"`
+	LogFormat string   `json:"log_format"`
 }
 
 type EngineConfig struct {
@@ -96,6 +99,7 @@ type RuleConfig struct {
 	PathRegex          string
 	QueryRegex         string
 	Statuses           []int
+	Methods            []string
 	UniqueBy           string
 	Window             time.Duration
 	Threshold          int
@@ -189,6 +193,7 @@ type rawRuleConfig struct {
 	PathRegex  *string  `json:"path_regex"`
 	QueryRegex string   `json:"query_regex"`
 	Statuses   []int    `json:"statuses"`
+	Methods    []string `json:"methods"`
 	UniqueBy   string   `json:"unique_by"`
 	Window     *string  `json:"window"`
 	Threshold  *int     `json:"threshold"`
@@ -409,7 +414,8 @@ func parseLogSources(single string, named map[string]json.RawMessage) ([]LogSour
 		if !filepath.IsAbs(single) {
 			return nil, fmt.Errorf("log_file must be an absolute path")
 		}
-		return []LogSourceConfig{{ID: "default", Path: filepath.Clean(single), Format: LogFormatNginxCombined}}, nil
+		path := filepath.Clean(single)
+		return []LogSourceConfig{{ID: "default", Path: path, Paths: []string{path}, Format: LogFormatNginxCombined}}, nil
 	}
 	if len(named) == 0 {
 		return nil, fmt.Errorf("log_file or log_sources is required")
@@ -428,8 +434,23 @@ func parseLogSources(single string, named map[string]json.RawMessage) ([]LogSour
 				return nil, fmt.Errorf("log_sources[%q]: expected a path string or object with path, format, and log_format", id)
 			}
 		}
-		path := source.Path
-		if !filepath.IsAbs(path) {
+		paths := append([]string(nil), source.Paths...)
+		if source.Path != "" {
+			found := false
+			for _, candidate := range paths {
+				if filepath.Clean(candidate) == filepath.Clean(source.Path) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				paths = append([]string{source.Path}, paths...)
+			}
+		}
+		if source.Path == "" {
+			source.Path = paths[0]
+		}
+		if !filepath.IsAbs(source.Path) {
 			return nil, fmt.Errorf("log_sources[%q] must be an absolute path", id)
 		}
 		if source.Format == "" {
@@ -451,13 +472,25 @@ func parseLogSources(single string, named map[string]json.RawMessage) ([]LogSour
 		default:
 			return nil, fmt.Errorf("log_sources[%q]: unsupported format %q", id, source.Format)
 		}
-		path = filepath.Clean(path)
-		if other, exists := seenPaths[path]; exists {
-			return nil, fmt.Errorf("log_sources[%q] and log_sources[%q] use the same path %q", other, id, path)
+		cleanPaths := make([]string, 0, len(paths))
+		local := map[string]bool{}
+		for _, path := range paths {
+			if !filepath.IsAbs(path) {
+				return nil, fmt.Errorf("log_sources[%q] paths must be absolute", id)
+			}
+			path = filepath.Clean(path)
+			if local[path] {
+				return nil, fmt.Errorf("log_sources[%q] contains duplicate path %q", id, path)
+			}
+			if other, exists := seenPaths[path]; exists {
+				return nil, fmt.Errorf("log_sources[%q] and log_sources[%q] use the same path %q", other, id, path)
+			}
+			local[path], seenPaths[path] = true, id
+			cleanPaths = append(cleanPaths, path)
 		}
-		seenPaths[path] = id
 		source.ID = id
-		source.Path = path
+		source.Path = filepath.Clean(source.Path)
+		source.Paths = cleanPaths
 		result = append(result, source)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
@@ -575,6 +608,10 @@ func parseRule(raw rawRuleConfig) (RuleConfig, error) {
 			return RuleConfig{}, fmt.Errorf("invalid HTTP status %d", status)
 		}
 	}
+	methods, err := canonicalHTTPMethods(raw.Methods)
+	if err != nil {
+		return RuleConfig{}, err
+	}
 	window, err := time.ParseDuration(*raw.Window)
 	if err != nil || window <= 0 {
 		return RuleConfig{}, fmt.Errorf("window must be a positive duration")
@@ -612,7 +649,25 @@ func parseRule(raw rawRuleConfig) (RuleConfig, error) {
 	if raw.Enabled != nil {
 		enabled = *raw.Enabled
 	}
-	return RuleConfig{ID: raw.ID, Enabled: enabled, ExplicitlyDisabled: raw.Enabled != nil && !*raw.Enabled, Type: ruleType, Action: strings.TrimSpace(raw.Action), LogSource: logSource, PathRegex: *raw.PathRegex, QueryRegex: raw.QueryRegex, Statuses: raw.Statuses, UniqueBy: raw.UniqueBy, Window: window, Threshold: *raw.Threshold, GroupBy: *raw.GroupBy}, nil
+	return RuleConfig{ID: raw.ID, Enabled: enabled, ExplicitlyDisabled: raw.Enabled != nil && !*raw.Enabled, Type: ruleType, Action: strings.TrimSpace(raw.Action), LogSource: logSource, PathRegex: *raw.PathRegex, QueryRegex: raw.QueryRegex, Statuses: raw.Statuses, Methods: methods, UniqueBy: raw.UniqueBy, Window: window, Threshold: *raw.Threshold, GroupBy: *raw.GroupBy}, nil
+}
+
+func canonicalHTTPMethods(values []string) ([]string, error) {
+	allowed := map[string]bool{"GET": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true, "HEAD": true, "OPTIONS": true}
+	seen := make(map[string]bool, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		method := strings.ToUpper(strings.TrimSpace(value))
+		if !allowed[method] {
+			return nil, fmt.Errorf("unsupported HTTP method %q", value)
+		}
+		if !seen[method] {
+			seen[method] = true
+			result = append(result, method)
+		}
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 func validateRuleActions(mode string, engine EngineConfig) error {

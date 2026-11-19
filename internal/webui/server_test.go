@@ -274,3 +274,14 @@ func TestMissingDaemonSocketReturnsUnavailableWithoutLosingSession(t *testing.T)
 		t.Fatalf("daemon outage revoked independent web session: %d", w.Code)
 	}
 }
+
+func TestHistoricalJobsRequireExplicitStartupBoundary(t *testing.T) {
+	s := fixtureServer(t)
+	admin, session := loginAs(t, s, "admin")
+	if w := request(s, "GET", "/api/history/jobs", "", admin, "", ""); w.Code != http.StatusNotFound {
+		t.Fatalf("GET disabled history jobs = %d: %s", w.Code, w.Body.String())
+	}
+	if w := request(s, "POST", "/api/history/jobs", `{"source_id":"web","directory":"/tmp","name_regex":".*"}`, admin, session.CSRF, s.origin.String()); w.Code != http.StatusNotFound {
+		t.Fatalf("POST disabled history jobs = %d: %s", w.Code, w.Body.String())
+	}
+}

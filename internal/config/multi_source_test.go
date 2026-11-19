@@ -120,6 +120,7 @@ func TestDecodeRejectsInvalidOrAmbiguousLogSourceConfig(t *testing.T) {
 	tests := []struct{ name, config, override string }{
 		{"mixed source forms", `{"log_file":"/tmp/a.log","log_sources":{"web":"/tmp/b.log"}}`, ""},
 		{"duplicate paths", `{"log_sources":{"web":"/tmp/a.log","other":"/tmp/./a.log"},"engine":{"rules":[{"id":"a","log_source":"web","path_regex":"^/$","window":"1s","threshold":1,"group_by":"ip"},{"id":"b","log_source":"other","path_regex":"^/$","window":"1s","threshold":1,"group_by":"ip"}]}}`, ""},
+		{"duplicate paths within source", `{"log_sources":{"web":{"paths":["/tmp/a.log","/tmp/./a.log"]}}}`, ""},
 		{"missing source on multi config", `{"log_sources":{"a":"/tmp/a.log","b":"/tmp/b.log"},"engine":{"rules":[{"id":"r","path_regex":"^/$","window":"1s","threshold":1,"group_by":"ip"}]}}`, ""},
 		{"unknown source", `{"log_sources":{"a":"/tmp/a.log"},"engine":{"rules":[{"id":"r","log_source":"missing","path_regex":"^/$","window":"1s","threshold":1,"group_by":"ip"}]}}`, ""},
 		{"unused source", `{"log_sources":{"a":"/tmp/a.log","b":"/tmp/b.log"},"engine":{"rules":[{"id":"r","log_source":"a","path_regex":"^/$","window":"1s","threshold":1,"group_by":"ip"}]}}`, ""},
@@ -134,5 +135,15 @@ func TestDecodeRejectsInvalidOrAmbiguousLogSourceConfig(t *testing.T) {
 				t.Fatal("decode unexpectedly succeeded")
 			}
 		})
+	}
+}
+
+func TestDecodeMultiFileLogicalSource(t *testing.T) {
+	cfg, err := decode(strings.NewReader(`{"log_sources":{"web":{"path":"/tmp/a.log","paths":["/tmp/a.log","/tmp/b.log"],"format":"nginx_combined"}},"engine":{"rules":[{"id":"r","log_source":"web","path_regex":"^/$","window":"1s","threshold":1,"group_by":"ip"}]}}`), "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.LogSources) != 1 || len(cfg.LogSources[0].Paths) != 2 || cfg.LogSources[0].Path != "/tmp/a.log" || len(cfg.Engine.Rules) != 1 {
+		t.Fatalf("logical source: %+v", cfg)
 	}
 }

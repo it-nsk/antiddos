@@ -17,20 +17,25 @@ var (
 	sshTimeRE         = regexp.MustCompile(`^([A-Z][a-z]{2})\s+([ 0-9][0-9])\s+([0-9]{2}:[0-9]{2}:[0-9]{2})`)
 	securityISOTimeRE = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+)`)
 	sshIPRE           = regexp.MustCompile(`\bfrom ([0-9a-fA-F:.]+)\b`)
+	sshRhostIPRE      = regexp.MustCompile(`\brhost=([0-9a-fA-F:.]+)\b`)
 	netfilterIPRE     = regexp.MustCompile(`\bSRC=([0-9a-fA-F:.]+)\b`)
 	netfilterPortRE   = regexp.MustCompile(`\bDPT=([0-9]{1,5})\b`)
 	netfilterProtoRE  = regexp.MustCompile(`\bPROTO=([A-Za-z0-9]+)\b`)
 )
 
-type nginxErrorParser struct{}
+type nginxErrorParser struct{ location *time.Location }
 
-func (nginxErrorParser) Parse(line string) (request.Event, error) {
+func (parser nginxErrorParser) Parse(line string) (request.Event, error) {
 	timeMatch := nginxErrorTimeRE.FindStringSubmatch(line)
 	ipMatch := nginxErrorIPRE.FindStringSubmatch(line)
 	if timeMatch == nil || ipMatch == nil {
 		return request.Event{}, fmt.Errorf("parse nginx error: expected timestamp and client IP")
 	}
-	timestamp, err := time.ParseInLocation("2006/01/02 15:04:05", timeMatch[1], time.Local)
+	location := parser.location
+	if location == nil {
+		location = time.Local
+	}
+	timestamp, err := time.ParseInLocation("2006/01/02 15:04:05", timeMatch[1], location)
 	if err != nil {
 		return request.Event{}, fmt.Errorf("parse nginx error timestamp: %w", err)
 	}
@@ -46,14 +51,32 @@ func (nginxErrorParser) Parse(line string) (request.Event, error) {
 	return request.Event{Timestamp: timestamp, IP: ip, Method: "NGINX_ERROR", Path: path, Protocol: "-", Status: 500, UserAgent: line}, nil
 }
 
-type syslogSSHDParser struct{}
+type syslogSSHDParser struct {
+	location *time.Location
+	year     int
+}
 
-func (syslogSSHDParser) Parse(line string) (request.Event, error) {
+func (parser syslogSSHDParser) Parse(line string) (request.Event, error) {
+	lower := strings.ToLower(line)
 	ipMatch := sshIPRE.FindStringSubmatch(line)
+	if ipMatch == nil && strings.Contains(lower, "authentication failure") {
+		ipMatch = sshRhostIPRE.FindStringSubmatch(line)
+	}
+	path := ""
+	switch {
+	case strings.Contains(lower, "invalid user") && ipMatch != nil:
+		path = "/ssh/invalid-user"
+	case strings.Contains(lower, "failed password"), strings.Contains(lower, "failed publickey"), strings.Contains(lower, "authentication failure"):
+		path = "/ssh/failed"
+	case strings.Contains(lower, "invalid user"):
+		return request.Event{}, fmt.Errorf("%w: duplicate SSH invalid-user record without remote address", ErrIgnored)
+	default:
+		return request.Event{}, fmt.Errorf("%w: non-failed SSH authentication record", ErrIgnored)
+	}
 	if ipMatch == nil {
 		return request.Event{}, fmt.Errorf("parse ssh auth: expected syslog timestamp and remote IP")
 	}
-	timestamp, err := parseSecuritySyslogTimestamp(line)
+	timestamp, err := parseSecuritySyslogTimestamp(line, parser.location, parser.year)
 	if err != nil {
 		return request.Event{}, fmt.Errorf("parse ssh auth timestamp: %w", err)
 	}
@@ -61,23 +84,19 @@ func (syslogSSHDParser) Parse(line string) (request.Event, error) {
 	if err != nil {
 		return request.Event{}, fmt.Errorf("parse ssh auth IP %q: %w", ipMatch[1], err)
 	}
-	lower := strings.ToLower(line)
-	path := ""
-	switch {
-	case strings.Contains(lower, "invalid user"):
-		path = "/ssh/invalid-user"
-	case strings.Contains(lower, "failed password"), strings.Contains(lower, "failed publickey"), strings.Contains(lower, "authentication failure"):
-		path = "/ssh/failed"
-	default:
-		return request.Event{}, fmt.Errorf("ignore non-failed SSH authentication record")
-	}
 	return request.Event{Timestamp: timestamp, IP: ip, Method: "SSH", Path: path, Protocol: "-", Status: 401, UserAgent: line}, nil
 }
 
-type netfilterLogParser struct{}
+type netfilterLogParser struct {
+	location *time.Location
+	year     int
+}
 
-func (netfilterLogParser) Parse(line string) (request.Event, error) {
+func (parser netfilterLogParser) Parse(line string) (request.Event, error) {
 	ipMatch, portMatch, protoMatch := netfilterIPRE.FindStringSubmatch(line), netfilterPortRE.FindStringSubmatch(line), netfilterProtoRE.FindStringSubmatch(line)
+	if ipMatch == nil && portMatch == nil && protoMatch == nil {
+		return request.Event{}, fmt.Errorf("%w: non-netfilter kernel record", ErrIgnored)
+	}
 	if ipMatch == nil || portMatch == nil || protoMatch == nil {
 		return request.Event{}, fmt.Errorf("parse netfilter log: expected SRC, DPT, and PROTO")
 	}
@@ -88,7 +107,7 @@ func (netfilterLogParser) Parse(line string) (request.Event, error) {
 	if _, err := strconv.Atoi(portMatch[1]); err != nil {
 		return request.Event{}, fmt.Errorf("parse netfilter destination port %q: %w", portMatch[1], err)
 	}
-	timestamp, err := parseSecuritySyslogTimestamp(line)
+	timestamp, err := parseSecuritySyslogTimestamp(line, parser.location, parser.year)
 	if err != nil {
 		return request.Event{}, err
 	}
@@ -96,7 +115,7 @@ func (netfilterLogParser) Parse(line string) (request.Event, error) {
 	return request.Event{Timestamp: timestamp, IP: ip, Method: "NETFILTER", Path: "/port/" + proto + "/" + portMatch[1], Protocol: proto, Status: 403, UserAgent: line}, nil
 }
 
-func parseSecuritySyslogTimestamp(line string) (time.Time, error) {
+func parseSecuritySyslogTimestamp(line string, location *time.Location, year int) (time.Time, error) {
 	if match := securityISOTimeRE.FindStringSubmatch(line); match != nil {
 		timestamp, err := time.Parse(time.RFC3339Nano, match[1])
 		if err != nil {
@@ -108,7 +127,13 @@ func parseSecuritySyslogTimestamp(line string) (time.Time, error) {
 	if timeMatch == nil {
 		return time.Time{}, fmt.Errorf("parse security log timestamp: expected syslog timestamp")
 	}
-	timestamp, err := time.ParseInLocation("2006 Jan 2 15:04:05", fmt.Sprintf("%d %s %s %s", time.Now().Year(), timeMatch[1], strings.TrimSpace(timeMatch[2]), timeMatch[3]), time.Local)
+	if location == nil {
+		location = time.Local
+	}
+	if year == 0 {
+		year = time.Now().Year()
+	}
+	timestamp, err := time.ParseInLocation("2006 Jan 2 15:04:05", fmt.Sprintf("%d %s %s %s", year, timeMatch[1], strings.TrimSpace(timeMatch[2]), timeMatch[3]), location)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parse security log timestamp: %w", err)
 	}

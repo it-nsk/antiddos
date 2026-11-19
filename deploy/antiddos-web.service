@@ -22,6 +22,9 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectHome=true
 ProtectSystem=strict
+# Historical publication writes SQLite WAL/SHM files into the daemon's
+# database directory. The web process still has no firewall or log authority.
+ReadWritePaths=/var/lib/antiddos
 ProtectKernelTunables=true
 ProtectControlGroups=true
 ProtectKernelLogs=true
@@ -31,7 +34,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 IPAddressDeny=any
 IPAddressAllow=localhost
 StateDirectory=antiddos-web
-StateDirectoryMode=0700
+StateDirectoryMode=0770
 
 [Install]
 WantedBy=multi-user.target

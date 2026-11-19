@@ -53,9 +53,17 @@ func ParseNginx(line string) (request.Event, error) {
 	if err != nil {
 		return request.Event{}, err
 	}
+	var responseTimeMillis *int64
 	for !fields.done() {
-		if _, err := fields.quoted("extension field"); err != nil {
+		value, err := fields.nextField("extension field")
+		if err != nil {
 			return request.Event{}, err
+		}
+		if responseTimeMillis == nil {
+			if seconds, err := strconv.ParseFloat(strings.Trim(value, `"`), 64); err == nil && seconds >= 0 {
+				ms := int64(seconds*1000 + 0.5)
+				responseTimeMillis = &ms
+			}
 		}
 	}
 
@@ -91,16 +99,17 @@ func ParseNginx(line string) (request.Event, error) {
 	}
 
 	return request.Event{
-		Timestamp:     timestamp,
-		IP:            ip,
-		Method:        requestParts[0],
-		Path:          requestURL.EscapedPath(),
-		RawQuery:      requestURL.RawQuery,
-		Query:         query,
-		Protocol:      requestParts[2],
-		Status:        status,
-		ResponseBytes: responseBytes,
-		UserAgent:     unescapeNginx(userAgent),
+		Timestamp:          timestamp,
+		IP:                 ip,
+		Method:             requestParts[0],
+		Path:               requestURL.EscapedPath(),
+		RawQuery:           requestURL.RawQuery,
+		Query:              query,
+		Protocol:           requestParts[2],
+		Status:             status,
+		ResponseBytes:      responseBytes,
+		ResponseTimeMillis: responseTimeMillis,
+		UserAgent:          unescapeNginx(userAgent),
 	}, nil
 }
 
@@ -119,6 +128,17 @@ func parseOptionalBytes(value string) (*int64, error) {
 type fieldScanner struct {
 	line string
 	pos  int
+}
+
+func (s *fieldScanner) nextField(name string) (string, error) {
+	s.skipSpaces()
+	if s.pos >= len(s.line) {
+		return "", fmt.Errorf("parse %s: missing field", name)
+	}
+	if s.line[s.pos] == '"' {
+		return s.quoted(name)
+	}
+	return s.bare(name)
 }
 
 func (s *fieldScanner) bare(name string) (string, error) {

@@ -9,13 +9,18 @@ import (
 )
 
 type TrafficPoint struct {
-	Time       int64 `json:"time"`
-	Interval   int64 `json:"interval"`
-	Requests   int64 `json:"requests"`
-	Matched    int64 `json:"matched"`
-	Bytes      int64 `json:"bytes"`
-	KnownRows  int64 `json:"known_rows"`
-	Detections int64 `json:"detections"`
+	Time                int64   `json:"time"`
+	Interval            int64   `json:"interval"`
+	Requests            int64   `json:"requests"`
+	Matched             int64   `json:"matched"`
+	Bytes               int64   `json:"bytes"`
+	KnownRows           int64   `json:"known_rows"`
+	Detections          int64   `json:"detections"`
+	ResponseTimeMinMS   int64   `json:"response_time_min_ms"`
+	ResponseTimeAvgMS   float64 `json:"response_time_avg_ms"`
+	ResponseTimeMaxMS   int64   `json:"response_time_max_ms"`
+	ResponseTimeRows    int64   `json:"response_time_rows"`
+	ResponseTimeTotalMS int64   `json:"response_time_total_ms"`
 }
 type DashboardDetection struct {
 	ID         int64  `json:"id"`
@@ -67,8 +72,8 @@ type SourceTraffic struct {
 func (r *Reader) Dashboard(ctx context.Context, from, to time.Time, before int64, limit int) (Dashboard, error) {
 	d := Dashboard{From: from.Unix(), To: to.Unix(), UpdatedAt: time.Now().Unix(), Points: []TrafficPoint{}, SourcePoints: []SourceTraffic{}, Detections: []DashboardDetection{}, Blocks: []DashboardBlock{}}
 	span := d.To - d.From
-	if d.From < 0 || span < 15 || span > 31*86400 || limit < 1 || limit > 1000 || before < 0 {
-		return d, fmt.Errorf("range must be 15 seconds–31 days; limit 1–1000; cursor nonnegative")
+	if d.From < 0 || span < 15 || limit < 1 || limit > 1000 || before < 0 {
+		return d, fmt.Errorf("range must be at least 15 seconds; limit 1–1000; cursor nonnegative")
 	}
 	step := ((span+599)/600 + 14) / 15 * 15
 	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
@@ -153,14 +158,14 @@ func (r *Reader) Dashboard(ctx context.Context, from, to time.Time, before int64
 		d.SourcePoints = append(d.SourcePoints, source)
 	}
 	sort.Slice(d.SourcePoints, func(i, j int) bool { return d.SourcePoints[i].SourceID < d.SourcePoints[j].SourceID })
-	rows, err := tx.QueryContext(ctx, `SELECT (bucket_start_unix / ?) * ?, SUM(requests),SUM(matched_requests),SUM(response_bytes),SUM(known_response_byte_rows)
- FROM traffic_samples WHERE bucket_start_unix>=? AND bucket_start_unix<? GROUP BY 1 ORDER BY 1`, step, step, d.From, d.To)
+	rows, err := tx.QueryContext(ctx, `SELECT (t.bucket_start_unix / ?) * ?, SUM(t.requests),SUM(t.matched_requests),SUM(t.response_bytes),SUM(t.known_response_byte_rows),COALESCE(MIN(r.min_ms),0),CASE WHEN SUM(r.rows)>0 THEN CAST(SUM(r.total_ms) AS REAL)/SUM(r.rows) ELSE 0 END,COALESCE(MAX(r.max_ms),0),COALESCE(SUM(r.rows),0),COALESCE(SUM(r.total_ms),0)
+		FROM traffic_samples t LEFT JOIN (SELECT bucket_start_unix,MIN(min_ms) min_ms,MAX(max_ms) max_ms,SUM(total_ms) total_ms,SUM(rows) rows FROM response_time_samples GROUP BY bucket_start_unix) r ON r.bucket_start_unix=t.bucket_start_unix WHERE t.bucket_start_unix>=? AND t.bucket_start_unix<? GROUP BY 1 ORDER BY 1`, step, step, d.From, d.To)
 	if err != nil {
 		return d, err
 	}
 	for rows.Next() {
 		var p TrafficPoint
-		if err := rows.Scan(&p.Time, &p.Requests, &p.Matched, &p.Bytes, &p.KnownRows); err != nil {
+		if err := rows.Scan(&p.Time, &p.Requests, &p.Matched, &p.Bytes, &p.KnownRows, &p.ResponseTimeMinMS, &p.ResponseTimeAvgMS, &p.ResponseTimeMaxMS, &p.ResponseTimeRows, &p.ResponseTimeTotalMS); err != nil {
 			rows.Close()
 			return d, err
 		}

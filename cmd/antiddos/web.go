@@ -24,6 +24,13 @@ func webCommand(ctx context.Context, args []string, logger *slog.Logger, out io.
 	flags.StringVar(&o.Listen, "listen", "127.0.0.1:8080", "loopback listen IP:port")
 	flags.StringVar(&o.Origin, "origin", "http://127.0.0.1:8080", "exact browser origin (HTTPS for remote access)")
 	flags.StringVar(&o.DaemonSocket, "daemon-socket", webcontrol.DefaultSocketPath, "restricted daemon API socket")
+	flags.StringVar(&o.HistoryConfig, "history-config", "", "configuration snapshot used by managed historical jobs (requires --history-root and --history-output-dir)")
+	flags.StringVar(&o.HistoryOutputDir, "history-output-dir", "", "absolute directory for new managed historical SQLite databases")
+	flags.StringVar(&o.HistoryWorkDir, "history-work-dir", "", "explicit durable directory for historical external-sort chunks")
+	flags.IntVar(&o.HistoryNice, "history-nice", 10, "CPU nice of managed historical job (0-19)")
+	flags.IntVar(&o.HistoryIOPriority, "history-io-priority", 7, "best-effort I/O priority of managed historical job (0-7)")
+	flags.BoolVar(&o.HistoryPublish, "history-publish", false, "allow admins to publish completed managed historical jobs into the configured dashboard database")
+	flags.Func("history-root", "absolute directory allowed for managed historical log jobs (repeatable)", func(value string) error { o.HistoryRoots = append(o.HistoryRoots, value); return nil })
 	if err := flags.Parse(args); err != nil {
 		return err
 	}

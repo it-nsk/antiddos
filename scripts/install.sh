@@ -368,7 +368,7 @@ elif [[ ! -e "$environment_path" ]]; then
 fi
 
 chown -R "$service_user":"$service_group" "$state_dir"
-chmod 0700 "$state_dir"
+chmod 0770 "$state_dir"
 
 configured_log="$log_file_override"
 if [[ -z "$configured_log" && -r "$environment_path" ]]; then

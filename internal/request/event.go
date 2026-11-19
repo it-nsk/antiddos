@@ -18,11 +18,12 @@ type Event struct {
 	// RawLine is the complete source-log line that produced the event. It is
 	// attached by the application after parsing so a detection always retains
 	// the exact request or security event that caused it.
-	RawLine        string
-	Query          url.Values
-	Protocol       string
-	Status         int
-	ResponseOrigin string
-	ResponseBytes  *int64
-	UserAgent      string
+	RawLine            string
+	Query              url.Values
+	Protocol           string
+	Status             int
+	ResponseOrigin     string
+	ResponseBytes      *int64
+	ResponseTimeMillis *int64
+	UserAgent          string
 }

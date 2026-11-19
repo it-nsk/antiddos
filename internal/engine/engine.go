@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	ruleSemanticsVersion = "get-path-regex-v2-source-rule-whitelist"
+	ruleSemanticsVersion = "get-path-regex-v3-complete-detection-semantics"
 	minimumMapShrinkSize = 4096
 	ipv4MappedPrefixBits = 96
 )
@@ -31,6 +31,7 @@ type Rule struct {
 	PathRegex  string
 	QueryRegex string
 	Statuses   []int
+	Methods    []string
 	UniqueBy   string
 	Window     time.Duration
 	Threshold  int
@@ -88,6 +89,7 @@ type compiledRule struct {
 	pathRegex  *regexp.Regexp
 	queryRegex *regexp.Regexp
 	statuses   map[int]struct{}
+	methods    map[string]struct{}
 	uniqueBy   string
 	window     time.Duration
 	threshold  int
@@ -180,6 +182,10 @@ func compileRule(rule Rule) (compiledRule, error) {
 	for _, status := range rule.Statuses {
 		statuses[status] = struct{}{}
 	}
+	methods := make(map[string]struct{}, len(rule.Methods))
+	for _, method := range rule.Methods {
+		methods[strings.ToUpper(method)] = struct{}{}
+	}
 	if rule.Window <= 0 {
 		return compiledRule{}, fmt.Errorf("window must be positive")
 	}
@@ -195,7 +201,7 @@ func compileRule(rule Rule) (compiledRule, error) {
 		return compiledRule{}, err
 	}
 	return compiledRule{
-		id: rule.ID, ruleType: rule.Type, disabled: rule.Disabled, logSource: rule.LogSource, revision: revision, pathRegex: pathRegex, queryRegex: queryRegex, statuses: statuses, uniqueBy: rule.UniqueBy, window: rule.Window,
+		id: rule.ID, ruleType: rule.Type, disabled: rule.Disabled, logSource: rule.LogSource, revision: revision, pathRegex: pathRegex, queryRegex: queryRegex, statuses: statuses, methods: methods, uniqueBy: rule.UniqueBy, window: rule.Window,
 		threshold: rule.Threshold,
 		grouping:  compiledGrouping{field: rule.GroupBy, key: key, groups: make(map[GroupKey]*timestampWindow)},
 	}, nil
@@ -379,10 +385,16 @@ func (rule *compiledRule) matches(event request.Event) bool {
 	// HTTP access rules retain the historical GET-only behavior. Security log
 	// parsers use explicit non-HTTP methods and are matched by their normalized
 	// event path (for example /ssh/failed or /port/tcp/22).
-	switch event.Method {
-	case "GET", "SSH", "NETFILTER", "NGINX_ERROR":
-	default:
-		return false
+	if len(rule.methods) > 0 {
+		if _, ok := rule.methods[event.Method]; !ok {
+			return false
+		}
+	} else {
+		switch event.Method {
+		case "GET", "SSH", "NETFILTER", "NGINX_ERROR":
+		default:
+			return false
+		}
 	}
 	if !rule.pathRegex.MatchString(event.Path) {
 		return false
@@ -515,22 +527,47 @@ func AnalysisConfigID(ruleRevisions []string) string {
 
 func ruleRevision(rule Rule) (string, error) {
 	canonical := struct {
-		Version   string     `json:"version"`
-		ID        string     `json:"id"`
-		LogSource string     `json:"log_source"`
-		IgnoreIPs []string   `json:"ignore_ips"`
-		PathRegex string     `json:"path_regex"`
-		WindowNS  int64      `json:"window_ns"`
-		Threshold int        `json:"threshold"`
-		GroupBy   GroupField `json:"group_by"`
-		Policy    string     `json:"notification_policy"`
-	}{ruleSemanticsVersion, rule.ID, rule.LogSource, canonicalPrefixes(rule.IgnoreIPs), rule.PathRegex, int64(rule.Window), rule.Threshold, rule.GroupBy, "every-threshold-violation"}
+		Version    string     `json:"version"`
+		ID         string     `json:"id"`
+		Type       string     `json:"type"`
+		LogSource  string     `json:"log_source"`
+		IgnoreIPs  []string   `json:"ignore_ips"`
+		PathRegex  string     `json:"path_regex"`
+		QueryRegex string     `json:"query_regex"`
+		Statuses   []int      `json:"statuses"`
+		Methods    []string   `json:"methods"`
+		UniqueBy   string     `json:"unique_by"`
+		WindowNS   int64      `json:"window_ns"`
+		Threshold  int        `json:"threshold"`
+		GroupBy    GroupField `json:"group_by"`
+		Policy     string     `json:"notification_policy"`
+	}{
+		Version: ruleSemanticsVersion, ID: rule.ID, Type: rule.Type, LogSource: rule.LogSource,
+		IgnoreIPs: canonicalPrefixes(rule.IgnoreIPs), PathRegex: rule.PathRegex, QueryRegex: rule.QueryRegex,
+		Statuses: canonicalStatuses(rule.Statuses), Methods: canonicalMethods(rule.Methods), UniqueBy: rule.UniqueBy, WindowNS: int64(rule.Window),
+		Threshold: rule.Threshold, GroupBy: rule.GroupBy, Policy: "every-threshold-violation",
+	}
 	encoded, err := json.Marshal(canonical)
 	if err != nil {
 		return "", fmt.Errorf("encode rule revision: %w", err)
 	}
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func canonicalMethods(values []string) []string {
+	result := append([]string(nil), values...)
+	for index := range result {
+		result[index] = strings.ToUpper(result[index])
+	}
+	sort.Strings(result)
+	return result
+}
+
+func canonicalStatuses(values []int) []int {
+	result := append([]int(nil), values...)
+	sort.Ints(result)
+	return result
 }
 
 func canonicalPrefixes(values []string) []string {

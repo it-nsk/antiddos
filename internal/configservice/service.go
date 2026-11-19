@@ -37,6 +37,7 @@ type Rule struct {
 	PathRegex  string   `json:"path_regex"`
 	QueryRegex string   `json:"query_regex,omitempty"`
 	Statuses   []int    `json:"statuses,omitempty"`
+	Methods    []string `json:"methods,omitempty"`
 	UniqueBy   string   `json:"unique_by,omitempty"`
 	GroupBy    string   `json:"group_by"`
 	Window     string   `json:"window"`
@@ -77,6 +78,7 @@ type RuleUpdate struct {
 	PathRegex  *string   `json:"path_regex"`
 	QueryRegex *string   `json:"query_regex,omitempty"`
 	Statuses   *[]int    `json:"statuses,omitempty"`
+	Methods    *[]string `json:"methods,omitempty"`
 	UniqueBy   *string   `json:"unique_by,omitempty"`
 	Action     *string   `json:"action,omitempty"`
 	Window     *string   `json:"window,omitempty"`
@@ -127,7 +129,7 @@ func document(data []byte) (Document, error) {
 		if ips == nil {
 			ips = []string{}
 		}
-		d.Rules = append(d.Rules, Rule{ID: r.ID, Enabled: r.Enabled, Type: r.Type, Action: r.Action, LogSource: r.LogSource, PathRegex: r.PathRegex, QueryRegex: r.QueryRegex, Statuses: r.Statuses, UniqueBy: r.UniqueBy, GroupBy: r.GroupBy, Window: r.Window.String(), Threshold: r.Threshold, IgnoreIPs: ips})
+		d.Rules = append(d.Rules, Rule{ID: r.ID, Enabled: r.Enabled, Type: r.Type, Action: r.Action, LogSource: r.LogSource, PathRegex: r.PathRegex, QueryRegex: r.QueryRegex, Statuses: r.Statuses, Methods: r.Methods, UniqueBy: r.UniqueBy, GroupBy: r.GroupBy, Window: r.Window.String(), Threshold: r.Threshold, IgnoreIPs: ips})
 	}
 	for _, v := range cfg.LogSources {
 		d.Sources = append(d.Sources, Source{ID: v.ID, Path: v.Path, Format: v.Format, LogFormat: v.LogFormat})
@@ -294,7 +296,7 @@ func (s *Service) Save(update Update) (Document, error) {
 		engine = map[string]json.RawMessage{}
 		var rules []map[string]any
 		for _, r := range cfg.Engine.Rules {
-			rule := map[string]any{"id": r.ID, "enabled": r.Enabled, "type": r.Type, "log_source": r.LogSource, "path_regex": r.PathRegex, "query_regex": r.QueryRegex, "statuses": r.Statuses, "unique_by": r.UniqueBy, "window": r.Window.String(), "threshold": r.Threshold, "group_by": r.GroupBy}
+			rule := map[string]any{"id": r.ID, "enabled": r.Enabled, "type": r.Type, "log_source": r.LogSource, "path_regex": r.PathRegex, "query_regex": r.QueryRegex, "statuses": r.Statuses, "methods": r.Methods, "unique_by": r.UniqueBy, "window": r.Window.String(), "threshold": r.Threshold, "group_by": r.GroupBy}
 			if r.Action != "" {
 				rule["action"] = r.Action
 			}
@@ -366,7 +368,7 @@ func (s *Service) Save(update Update) (Document, error) {
 		if added.Type == "signature" && (added.Window != "1s" || added.Threshold != 1) {
 			return Document{}, fmt.Errorf("signature rule %q requires window 1s and threshold 1", added.ID)
 		}
-		m := map[string]any{"id": added.ID, "enabled": added.Enabled, "type": added.Type, "log_source": added.LogSource, "path_regex": added.PathRegex, "query_regex": added.QueryRegex, "statuses": added.Statuses, "unique_by": added.UniqueBy, "window": added.Window, "threshold": added.Threshold, "group_by": added.GroupBy, "ignore_ips": added.IgnoreIPs}
+		m := map[string]any{"id": added.ID, "enabled": added.Enabled, "type": added.Type, "log_source": added.LogSource, "path_regex": added.PathRegex, "query_regex": added.QueryRegex, "statuses": added.Statuses, "methods": added.Methods, "unique_by": added.UniqueBy, "window": added.Window, "threshold": added.Threshold, "group_by": added.GroupBy, "ignore_ips": added.IgnoreIPs}
 		if added.Action != "" {
 			m["action"] = added.Action
 		}
@@ -417,6 +419,9 @@ func (s *Service) Save(update Update) (Document, error) {
 			}
 			if ruleUpdate.Statuses != nil {
 				r["statuses"], _ = json.Marshal(*ruleUpdate.Statuses)
+			}
+			if ruleUpdate.Methods != nil {
+				r["methods"], _ = json.Marshal(*ruleUpdate.Methods)
 			}
 			if ruleUpdate.UniqueBy != nil {
 				r["unique_by"], _ = json.Marshal(*ruleUpdate.UniqueBy)

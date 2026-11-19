@@ -22,7 +22,14 @@ type Store struct {
 	db *sql.DB
 }
 
-func Open(path string) (*Store, error) {
+func Open(path string) (*Store, error) { return open(path, 5*time.Second) }
+
+// OpenHistoricalPublisher opens the live database for the brief final history
+// publication. It tolerates an ordinary daemon write without requiring the
+// daemon to stop or a separate maintenance window.
+func OpenHistoricalPublisher(path string) (*Store, error) { return open(path, time.Minute) }
+
+func open(path string, busyTimeout time.Duration) (*Store, error) {
 	if !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("SQLite path must be absolute")
 	}
@@ -30,7 +37,11 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("create SQLite directory: %w", err)
 	}
 
-	dsn := (&url.URL{Scheme: "file", Path: filepath.Clean(path)}).String()
+	u := &url.URL{Scheme: "file", Path: filepath.Clean(path)}
+	query := u.Query()
+	query.Set("_busy_timeout", fmt.Sprintf("%d", busyTimeout.Milliseconds()))
+	u.RawQuery = query.Encode()
+	dsn := u.String()
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite database: %w", err)
@@ -40,7 +51,7 @@ func Open(path string) (*Store, error) {
 	db.SetConnMaxLifetime(0)
 
 	store := &Store{db: db}
-	if err := store.configure(context.Background()); err != nil {
+	if err := store.configure(context.Background(), busyTimeout); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -48,14 +59,29 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("restrict SQLite database permissions: %w", err)
+	// The daemon owns the database, while the authenticated web process runs
+	// in the antiddos supplementary group and may publish reviewed historical
+	// results. Group write is required for SQLite WAL/shm creation.
+	if err := os.Chmod(path, 0o660); err != nil {
+		// The web publisher may be a member of the database owner's group but
+		// cannot chmod a file it does not own. Accept that case only when the
+		// existing mode already grants owner/group read-write and no access to
+		// other users.
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			db.Close()
+			return nil, fmt.Errorf("restrict SQLite database permissions: %w", err)
+		}
+		mode := info.Mode().Perm()
+		if mode&0o660 != 0o660 || mode&0o007 != 0 {
+			db.Close()
+			return nil, fmt.Errorf("restrict SQLite database permissions: %w", err)
+		}
 	}
 	return store, nil
 }
 
-func (store *Store) configure(ctx context.Context) error {
+func (store *Store) configure(ctx context.Context, busyTimeout time.Duration) error {
 	var journalMode string
 	if err := store.db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
 		return fmt.Errorf("enable SQLite WAL mode: %w", err)
@@ -65,7 +91,7 @@ func (store *Store) configure(ctx context.Context) error {
 	}
 	for _, pragma := range []string{
 		"PRAGMA synchronous=FULL",
-		"PRAGMA busy_timeout=5000",
+		fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeout.Milliseconds()),
 		"PRAGMA foreign_keys=ON",
 	} {
 		if _, err := store.db.ExecContext(ctx, pragma); err != nil {
@@ -95,6 +121,8 @@ func (store *Store) createSchema(ctx context.Context) error {
 			known_response_byte_rows INTEGER NOT NULL CHECK (known_response_byte_rows >= 0 AND known_response_byte_rows <= requests),
 			PRIMARY KEY (source_id, bucket_start_unix)
 		)`,
+		`CREATE TABLE IF NOT EXISTS response_time_samples (source_id TEXT NOT NULL, bucket_start_unix INTEGER NOT NULL, min_ms INTEGER NOT NULL, max_ms INTEGER NOT NULL, total_ms INTEGER NOT NULL, rows INTEGER NOT NULL, PRIMARY KEY(source_id,bucket_start_unix))`,
+		`CREATE TABLE IF NOT EXISTS history_response_time_samples (import_id TEXT NOT NULL, source_id TEXT NOT NULL, bucket_start_unix INTEGER NOT NULL, min_ms INTEGER NOT NULL, max_ms INTEGER NOT NULL, total_ms INTEGER NOT NULL, rows INTEGER NOT NULL, PRIMARY KEY(import_id,source_id,bucket_start_unix))`,
 		`CREATE TABLE IF NOT EXISTS detections (
 			id INTEGER PRIMARY KEY,
 			log_source TEXT NOT NULL DEFAULT '',
@@ -150,6 +178,58 @@ func (store *Store) createSchema(ctx context.Context) error {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS history_imports (
+			id TEXT PRIMARY KEY,
+			source_id TEXT NOT NULL,
+			created_at_unix_ms INTEGER NOT NULL,
+			first_event_unix_ns INTEGER NOT NULL,
+			last_event_unix_ns INTEGER NOT NULL,
+			files INTEGER NOT NULL,
+			lines INTEGER NOT NULL,
+			parsed INTEGER NOT NULL,
+			ignored INTEGER NOT NULL,
+			malformed INTEGER NOT NULL,
+			manifest_json TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS history_detection_provenance (
+			import_id TEXT NOT NULL,
+			detection_id INTEGER NOT NULL,
+			PRIMARY KEY (import_id, detection_id),
+			UNIQUE (detection_id),
+			FOREIGN KEY (import_id) REFERENCES history_imports(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+			FOREIGN KEY (detection_id) REFERENCES detections(id) ON DELETE RESTRICT
+		)`,
+		`CREATE TABLE IF NOT EXISTS history_traffic_samples (
+			import_id TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			bucket_start_unix INTEGER NOT NULL,
+			interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
+			requests INTEGER NOT NULL CHECK (requests >= 0),
+			matched_requests INTEGER NOT NULL CHECK (matched_requests >= 0 AND matched_requests <= requests),
+			response_bytes INTEGER NOT NULL CHECK (response_bytes >= 0),
+			known_response_byte_rows INTEGER NOT NULL CHECK (known_response_byte_rows >= 0 AND known_response_byte_rows <= requests),
+			PRIMARY KEY (import_id, source_id, bucket_start_unix),
+			FOREIGN KEY (import_id) REFERENCES history_imports(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+		)`,
+		// A historical result records facts about its input separately from any
+		// future claim over a shared-history period. This table is deliberately
+		// metadata only: no live traffic or detections are changed by it.
+		`CREATE TABLE IF NOT EXISTS history_coverage (
+			import_id TEXT PRIMARY KEY,
+			source_id TEXT NOT NULL,
+			observed_from_unix_ns INTEGER NOT NULL,
+			observed_to_unix_ns INTEGER NOT NULL,
+			has_requested_period INTEGER NOT NULL CHECK (has_requested_period IN (0,1)),
+			requested_from_unix_ns INTEGER,
+			requested_to_unix_ns INTEGER,
+			warmup_from_unix_ns INTEGER,
+			warmup_complete INTEGER NOT NULL CHECK (warmup_complete IN (0,1)),
+			analysis_config_id TEXT NOT NULL,
+			CHECK (observed_to_unix_ns >= observed_from_unix_ns),
+			CHECK ((has_requested_period=0 AND requested_from_unix_ns IS NULL AND requested_to_unix_ns IS NULL) OR
+			       (has_requested_period=1 AND requested_from_unix_ns IS NOT NULL AND requested_to_unix_ns IS NOT NULL AND requested_to_unix_ns > requested_from_unix_ns)),
+			FOREIGN KEY (import_id) REFERENCES history_imports(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := store.db.ExecContext(ctx, statement); err != nil {
@@ -185,6 +265,9 @@ func (store *Store) createSchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS detections_event_time_idx ON detections(event_time_unix_ns)`,
 		`CREATE INDEX IF NOT EXISTS detections_trigger_ip_time_idx ON detections(trigger_ip, event_time_unix_ns)`,
 		`CREATE INDEX IF NOT EXISTS detections_grouping_time_idx ON detections(grouping_id, event_time_unix_ns)`,
+		`CREATE INDEX IF NOT EXISTS history_detection_provenance_import_idx ON history_detection_provenance(import_id)`,
+		`CREATE INDEX IF NOT EXISTS history_traffic_samples_period_idx ON history_traffic_samples(bucket_start_unix, import_id)`,
+		`CREATE INDEX IF NOT EXISTS history_coverage_source_period_idx ON history_coverage(source_id, requested_from_unix_ns, requested_to_unix_ns)`,
 	} {
 		if _, err := store.db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("create SQLite index: %w", err)
@@ -422,6 +505,16 @@ func (store *Store) WriteTrafficSamples(ctx context.Context, samples []metrics.S
 		}
 		if _, err := sourceStatement.ExecContext(ctx, sample.SourceID, sample.BucketStartUnix, sample.IntervalSeconds, sample.Requests, sample.MatchedRequests, sample.ResponseBytes, sample.KnownResponseByteRows); err != nil {
 			return fmt.Errorf("write traffic sample for source %q at %d: %w", sample.SourceID, sample.BucketStartUnix, err)
+		}
+		if sample.ResponseTimeRows > 0 {
+			_, err := tx.ExecContext(ctx, `INSERT INTO response_time_samples(source_id,bucket_start_unix,min_ms,max_ms,total_ms,rows) VALUES(?,?,?,?,?,?) ON CONFLICT(source_id,bucket_start_unix) DO UPDATE SET min_ms=MIN(response_time_samples.min_ms,excluded.min_ms),max_ms=MAX(response_time_samples.max_ms,excluded.max_ms),total_ms=response_time_samples.total_ms+excluded.total_ms,rows=response_time_samples.rows+excluded.rows`, sample.SourceID, sample.BucketStartUnix, sample.ResponseTimeMinMillis, sample.ResponseTimeMaxMillis, sample.ResponseTimeTotalMillis, sample.ResponseTimeRows)
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO response_time_samples(source_id,bucket_start_unix,min_ms,max_ms,total_ms,rows) VALUES('',?,?,?,?,?) ON CONFLICT(source_id,bucket_start_unix) DO UPDATE SET min_ms=MIN(response_time_samples.min_ms,excluded.min_ms),max_ms=MAX(response_time_samples.max_ms,excluded.max_ms),total_ms=response_time_samples.total_ms+excluded.total_ms,rows=response_time_samples.rows+excluded.rows`, sample.BucketStartUnix, sample.ResponseTimeMinMillis, sample.ResponseTimeMaxMillis, sample.ResponseTimeTotalMillis, sample.ResponseTimeRows)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {

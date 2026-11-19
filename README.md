@@ -586,6 +586,243 @@ sudo systemctl restart antiddos
 
 </details>
 
+## Historical log analysis
+
+### Короткий сценарий после настройки
+
+После того как источник и правила уже настроены, исторический анализ не требует
+изменения конфига и не требует остановки сервисов. Нужны только три известных
+значения: имя источника из AntiDDoS, каталог с архивами и шаблон имён файлов.
+
+Сначала посмотрите имя источника. В выводе будет строка вида
+`web_access: /var/log/nginx/site_access.log`; в команду ниже подставляется
+часть до двоеточия:
+
+```shell
+sudo -u antiddos /usr/local/bin/antiddos monitor --once
+```
+
+Перед большим запуском безопасно проверьте, что regex выбирает именно нужные
+файлы. Эта команда только читает файлы: не открывает основную БД, не создаёт
+срабатывания и ничего не блокирует. Для обычного Nginx access log замените
+каталог и regex на свои:
+
+```shell
+sudo /usr/local/bin/antiddos history preview \
+  --directory /srv/antiddos-history/nginx \
+  --name-regex '^site_access\.log(?:\.[0-9]+(?:\.gz)?)?$'
+```
+
+Например, для `access.log`, `access.log.1` и `access.log.2.gz` нужен шаблон
+`^access\.log(?:\.[0-9]+(?:\.gz)?)?$`. Для датированных файлов шаблон должен
+описывать полное имя, например
+`^site-access-[0-9]{4}-[0-9]{2}-[0-9]{2}\.log\.gz$`.
+
+Если в `preview` перечислены только ожидаемые файлы, запускайте анализ. Меняются
+только три выделенных значения: `--source`, `--directory` и `--name-regex`.
+Остальную команду копируйте как есть:
+
+```shell
+sudo install -d -o root -g root -m 0700 /var/lib/antiddos-history/work
+sudo /usr/local/bin/antiddos history run \
+  --config /etc/antiddos/config.json \
+  --source web_access \
+  --directory /srv/antiddos-history/nginx \
+  --name-regex '^site_access\.log(?:\.[0-9]+(?:\.gz)?)?$' \
+  --work-directory /var/lib/antiddos-history/work \
+  --allow-malformed 10
+```
+
+Regex проверяется только по имени файла и охватывает активный лог и числовые
+ротации в plain text или gzip. `--source` можно опустить при единственном
+источнике. Команда сама находит диапазон событий, сортирует архивы, применяет все
+включённые правила, записывает traffic и detections в настроенную SQLite и
+публикует их в dashboard. История всегда работает как `dry_run`: блокировки,
+CAPTCHA и уведомления не создаются.
+
+Не останавливайте `antiddos` или `antiddos-web` для этой команды. Чтение и
+сортировка выполняются в изолированной SQLite в `--work-directory`; в основную
+БД попадает только короткая финальная публикация. Если daemon в этот момент
+пишет в SQLite, публикация ждёт до минуты. При ошибке изолированный результат
+остаётся на диске и его можно опубликовать отдельной командой, не перечитывая
+архивы. В этом случае CLI напечатает точные путь и `import`. Скопируйте их в
+команду повтора:
+
+```shell
+sudo /usr/local/bin/antiddos history publish \
+  --config /etc/antiddos/config.json \
+  --database /путь/из/сообщения/result.sqlite \
+  --confirm-import ID_из_сообщения
+```
+
+На загруженном production-сервере можно понизить приоритет анализа (он будет
+работать медленнее): замените начало основной команды
+`sudo /usr/local/bin/antiddos history run` на
+`sudo nice -n 10 /usr/local/bin/antiddos history run`. Строки
+`Read/sorted files` и `Analyzed` — это нормальный прогресс большого архива;
+после последней строки `Analyzed` идёт финальная атомарная публикация.
+
+Перед первым большим запуском убедитесь, что `/var/lib/antiddos-history/work`
+существует на постоянном диске и в нём есть место для сортировки. Импорт сам
+проверит свободное место до чтения логов и откажется, если его недостаточно.
+
+Успешное завершение печатает `Historical analysis recorded` и точный период.
+В UI выберите этот период в календаре — появятся графики traffic и
+срабатывания. Без UI можно убедиться, что база читается и увидеть последние
+интервалы/срабатывания:
+
+```shell
+sudo -u antiddos /usr/local/bin/antiddos monitor --once --limit 100
+```
+
+`history report` и `history detections` предназначены только для отдельного
+файла, сохранённого через `history run --result /абсолютный/путь/result.sqlite`;
+не передавайте им рабочую `/var/lib/antiddos/antiddos.sqlite`.
+
+Повторная публикация того же результата не дублирует строки. Исправленный
+результат с пересекающимся историческим периодом заменяет только прежний
+исторический вклад, сохраняя live-данные.
+
+<details>
+<summary>Расширенные команды: нестандартный формат, раздельный импорт и каталог истории</summary>
+
+`history preview` performs a read-only inventory of plain-text and gzip logs.
+It does not open SQLite, run rules, publish detections, or invoke any blocking
+action. The filename expression uses Go RE2 and is matched only against the
+base filename; matching is not implicitly anchored.
+
+```shell
+# Numeric rotations are ordered oldest first: .10.gz, .2.gz, .1, current.
+antiddos history preview \
+  --directory /var/log/nginx \
+  --name-regex '^site_access\.log(?:\.[0-9]+(?:\.gz)?)?$' \
+  --format nginx_combined
+
+# Legacy syslog records have no year or UTC offset, so both are mandatory.
+antiddos history preview \
+  --directory /var/log \
+  --name-regex '^auth\.log(?:\.[0-9]+(?:\.gz)?)?$' \
+  --format syslog_sshd \
+  --timezone Asia/Novosibirsk \
+  --syslog-year 2026
+```
+
+The command rejects symlinks and ZIP/other archive formats, streams gzip
+instead of loading it into memory, and reports parsed, intentionally ignored,
+and malformed lines,
+per-file event ranges, out-of-order timestamps, adjacent overlaps, and read
+errors. Resource limits are available through `--max-files`,
+`--max-input-bytes`, `--max-expanded-bytes`, and `--max-line-bytes`.
+Use `--order natural`, `lexical`, or `first-event`; the latter reads the
+matched files and orders the preview by each file's first recognized event.
+For dated names, use `--order filename-time` with `--filename-time-regex`
+(exactly one capture group) and `--filename-time-layout`, for example
+`^access-([0-9]{4}-[0-9]{2}-[0-9]{2})\\.log$` and `2006-01-02`.
+
+Preview itself does not import or evaluate rules; use `history run` for the
+complete configured-rule workflow.
+
+`history import` is the next isolated CLI layer. It snapshots one configured
+source and its enabled rules, globally sorts overlapping/out-of-order events
+with bounded-memory disk chunks, and publishes a brand-new SQLite database:
+
+```shell
+antiddos history import \
+  --config /etc/antiddos/config.json \
+  --source web_access \
+  --directory /srv/antiddos-history/nginx \
+  --name-regex '^site_access\.log(?:\.[0-9]+(?:\.gz)?)?$' \
+  --output /srv/antiddos-history/web.sqlite \
+  --allow-malformed 4
+```
+
+Use `--from` and `--to` with RFC3339 timestamps to publish only the half-open
+period `[from,to)`. Both flags are required together. The importer reads up to
+the maximum selected rule window before `from` to warm engine state, but does
+not publish warm-up traffic or detections. The result reports whether the
+selected files reach the required warm-up boundary.
+
+The output and temporary sort directory must have enough space for the SQLite
+result and external-sort chunks. `--sort-memory-bytes` bounds a chunk in memory;
+`--max-sort-bytes` and `--max-expanded-bytes` stop unexpectedly large input.
+Malformed lines are fatal unless their exact reviewed maximum is supplied with
+`--allow-malformed`. The output must not exist and cannot be the configured live
+database. Import uses no action router, block manager, live checkpoint, firewall,
+or soft-block component. It records a manifest and file SHA-256 fingerprints in
+`history_imports`; cancellation or failure leaves no published database.
+
+Inspect a completed isolated result without opening or modifying the configured
+live database:
+
+```shell
+antiddos history report --database /srv/antiddos-history/web.sqlite
+```
+
+Before any future shared-history publication, compare two or more period-bound
+results. This is read-only and refuses overlapping periods, incomplete warm-up,
+different source IDs, or different analysis identities:
+
+```shell
+antiddos history preflight --database /srv/antiddos-history/part-a.sqlite \
+  --database /srv/antiddos-history/part-b.sqlite
+```
+
+After preflight, register an eligible result in an explicitly separate catalog.
+The catalog stores SHA-256 and ownership metadata only; it does not copy traffic
+or detections into the live database and refuses period overlap atomically:
+
+```shell
+antiddos history catalog --catalog /srv/antiddos-history/catalog.sqlite \
+  --database /srv/antiddos-history/part-a.sqlite
+```
+
+Read catalog ownership separately from the live dashboard. This reports only
+registered historical periods for one logical source, including explicit gaps:
+
+```shell
+antiddos history catalog coverage --catalog /srv/antiddos-history/catalog.sqlite \
+  --source web_access --from 2026-10-13T08:00:00+07:00 \
+  --to 2026-10-13T09:00:00+07:00
+```
+
+Traffic and detection inspection remain read-only catalog commands; they verify
+the registered isolated-result hash before reading it:
+
+```shell
+antiddos history catalog traffic --catalog /srv/antiddos-history/catalog.sqlite \
+  --from 2026-10-13T08:00:00+07:00 --to 2026-10-13T09:00:00+07:00
+antiddos history catalog detections --catalog /srv/antiddos-history/catalog.sqlite \
+  --from 2026-10-13T08:00:00+07:00 --to 2026-10-13T09:00:00+07:00
+```
+
+To append a reviewed isolated result to the configured dashboard database, use
+an explicit import-ID confirmation. Publication is atomic and idempotent; an
+overlapping historical contribution is replaced by the new result, while live
+rows without historical provenance are preserved. It copies historical traffic
+and dry-run detections only—never block,
+soft-block, notification, or action records:
+
+```shell
+antiddos history publish --config /etc/antiddos/config.json \
+  --database /srv/antiddos-history/web.sqlite \
+  --confirm-import IMPORT_ID_FROM_HISTORY_REPORT
+```
+
+Replacing catalog ownership is explicit and keeps the old isolated result on
+disk for audit. The new period must overlap the named entry and retain the same
+source and analysis identity:
+
+```shell
+antiddos history catalog --catalog /srv/antiddos-history/catalog.sqlite \
+  --database /srv/antiddos-history/recomputed.sqlite \
+  --replace-import OLD_IMPORT_ID
+```
+
+The lower-level `import`, `report`, `detections`, `preflight`, `catalog`, and
+`publish` commands remain available for staged review and multi-part imports.
+
+</details>
+
 ## Data and runtime
 
 The daemon runs as the `antiddos` system user. Its main paths are:
@@ -634,4 +871,34 @@ The GitHub Actions release workflow builds Linux amd64 archives for tags beginni
 
 ```shell
 sudo bash /tmp/antiddos-install.sh --version v0.3.0
+```
+
+### Обновление работающей установки
+
+Для обновления до нового тега достаточно запустить installer с номером тега:
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/it-nsk/antiddos/vX.Y.Z/scripts/install.sh \
+  -o /tmp/antiddos-install.sh
+sudo bash /tmp/antiddos-install.sh --version vX.Y.Z
+```
+
+Installer заменяет `/usr/local/bin/antiddos` и systemd unit-файлы, затем
+перезапускает `antiddos` и, если UI уже установлен, `antiddos-web`.
+Содержимое следующих путей сохраняется:
+
+- `/etc/antiddos/config.json` — источники, правила, whitelist и режим работы;
+- `/var/lib/antiddos/antiddos.sqlite` — traffic, detections, блокировки и
+  опубликованная история;
+- `/var/lib/antiddos-web/users.sqlite` — пользователи и сессии UI;
+- `/etc/antiddos-challenge/keys.json` — ключи CAPTCHA, если soft-block включён;
+- каталог архивов и рабочая директория истории, например
+  `/var/lib/antiddos-history`.
+
+Перед обновлением не нужно удалять БД, конфиг или результаты истории. После
+обновления проверьте сервисы:
+
+```shell
+sudo systemctl is-active antiddos antiddos-web
+sudo -u antiddos /usr/local/bin/antiddos monitor --once
 ```

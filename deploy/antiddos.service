@@ -34,7 +34,7 @@ RestrictSUIDSGID=true
 # nftables and the legacy iptables/ipset backend.
 RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 StateDirectory=antiddos
-StateDirectoryMode=0700
+StateDirectoryMode=0770
 RuntimeDirectory=antiddos
 RuntimeDirectoryMode=0750
 

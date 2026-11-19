@@ -271,17 +271,19 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 		if len(rulesBySource[source.ID]) == 0 {
 			continue
 		}
-		follower, err := reader.Open(reader.Options{
-			Source: source.ID, Path: source.Path,
-			StartPosition: reader.StartPosition(cfg.StartPosition), Once: opts.Once,
-		}, logger)
-		if err != nil {
-			for _, opened := range followers {
-				opened.Close()
+		for _, physicalPath := range source.Paths {
+			follower, err := reader.Open(reader.Options{
+				Source: source.ID, Path: physicalPath,
+				StartPosition: reader.StartPosition(cfg.StartPosition), Once: opts.Once,
+			}, logger)
+			if err != nil {
+				for _, opened := range followers {
+					opened.Close()
+				}
+				return err
 			}
-			return err
+			followers = append(followers, follower)
 		}
-		followers = append(followers, follower)
 	}
 	if len(followers) == 0 {
 		return fmt.Errorf("no enabled rules")

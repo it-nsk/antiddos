@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"net/url"
@@ -26,6 +27,14 @@ type Parser interface {
 	Parse(string) (request.Event, error)
 }
 
+// ErrIgnored marks a valid source line which is outside a parser's event
+// contract, for example a successful login in an SSH authentication log.
+var ErrIgnored = errors.New("ignored source record")
+
+// IsIgnored distinguishes an intentionally skipped record from malformed
+// input. Historical previews use it without exposing source-line contents.
+func IsIgnored(err error) bool { return errors.Is(err, ErrIgnored) }
+
 type nginxCombinedParser struct{}
 
 func (nginxCombinedParser) Parse(line string) (request.Event, error) { return ParseNginx(line) }
@@ -34,6 +43,47 @@ func (nginxCombinedParser) Parse(line string) (request.Event, error) { return Pa
 // Nginx log_format directive or its quoted format string(s).
 func New(format, logFormat string) (Parser, error) {
 	return NewWithOriginRequirement(format, logFormat, false)
+}
+
+// HistoricalOptions supplies time context which is intentionally absent from
+// legacy syslog and Nginx error records. Live parsing keeps its established
+// machine-local defaults; historical callers must make these choices explicit.
+type HistoricalOptions struct {
+	Location   *time.Location
+	SyslogYear int
+}
+
+// NewHistorical constructs a parser without applying live wall-clock time to
+// records which omit a timezone or year.
+func NewHistorical(format, logFormat string, options HistoricalOptions) (Parser, error) {
+	switch format {
+	case FormatNginxError:
+		if options.Location == nil {
+			return nil, fmt.Errorf("historical %s requires an explicit timezone", format)
+		}
+		if logFormat != "" {
+			return nil, fmt.Errorf("log_format is not valid for %s", format)
+		}
+		return nginxErrorParser{location: options.Location}, nil
+	case FormatSyslogSSHD:
+		if options.Location == nil || options.SyslogYear == 0 {
+			return nil, fmt.Errorf("historical %s requires an explicit timezone and syslog year", format)
+		}
+		if logFormat != "" {
+			return nil, fmt.Errorf("log_format is not valid for %s", format)
+		}
+		return syslogSSHDParser{location: options.Location, year: options.SyslogYear}, nil
+	case FormatNetfilterLog:
+		if options.Location == nil || options.SyslogYear == 0 {
+			return nil, fmt.Errorf("historical %s requires an explicit timezone and syslog year", format)
+		}
+		if logFormat != "" {
+			return nil, fmt.Errorf("log_format is not valid for %s", format)
+		}
+		return netfilterLogParser{location: options.Location, year: options.SyslogYear}, nil
+	default:
+		return New(format, logFormat)
+	}
 }
 
 // NewWithOriginRequirement additionally validates the response-origin field
@@ -238,13 +288,20 @@ func eventFromFields(values map[string]string) (request.Event, error) {
 			return request.Event{}, err
 		}
 	}
+	var responseTimeMillis *int64
+	if value := values["request_time"]; value != "" && value != "-" {
+		if seconds, parseErr := strconv.ParseFloat(value, 64); parseErr == nil && seconds >= 0 {
+			ms := int64(seconds*1000 + 0.5)
+			responseTimeMillis = &ms
+		}
+	}
 	if protocol == "" {
 		protocol = "-"
 	}
 	return request.Event{
 		Timestamp: timestamp, IP: address, Method: method, Path: requestURL.EscapedPath(),
 		RawQuery: requestURL.RawQuery, Query: requestURL.Query(), Protocol: protocol,
-		Status: status, ResponseBytes: responseBytes,
+		Status: status, ResponseBytes: responseBytes, ResponseTimeMillis: responseTimeMillis,
 		ResponseOrigin: values["response_origin"],
 		UserAgent:      unescapeNginx(values["http_user_agent"]),
 	}, nil
@@ -272,6 +329,8 @@ func normalizedField(variable string) string {
 		return "status"
 	case "body_bytes_sent":
 		return "body_bytes_sent"
+	case "request_time":
+		return "request_time"
 	case "bytes_sent":
 		return "bytes_sent"
 	case "http_user_agent":

@@ -35,6 +35,7 @@ import (
 const usage = `Usage:
   antiddos run [OPTIONS]       run the analyzer directly
   antiddos monitor [OPTIONS]   show traffic, detections, and active blocks
+  antiddos history run         analyze archives with configured rules
   antiddos web [OPTIONS]       serve the local web interface
   antiddos challenge [OPTIONS] run the isolated soft-block checker
   antiddos challenge-keys rotate [OPTIONS] rotate checker signing keys
@@ -69,6 +70,8 @@ func executeCommand(ctx context.Context, args []string, logger *slog.Logger, out
 		err = run(ctx, args, logger)
 	case "monitor":
 		err = monitor(ctx, args[1:], out)
+	case "history":
+		err = historyCommand(ctx, args[1:], out)
 	case "web":
 		err = webCommand(ctx, args[1:], logger, out)
 	case "challenge":
