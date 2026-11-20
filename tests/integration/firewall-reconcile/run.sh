@@ -129,7 +129,7 @@ EOF
     "$binary" blocks reconcile
     [[ "$(query_origin "$external")" == 'external-firewall|external' ]] || fail "$backend did not import firewall-only address"
 
-    # Deleting a managed element is the reverse direction: the row must vanish.
+    # Explicit sync restores a detected SQLite-only lease to the firewall.
     if [[ "$backend" == nftables ]]; then
         nft delete element inet antiddos blocked_ipv4 "{ $client }"
         ! nft_has "$client" || fail 'nftables did not remove the managed element'
@@ -138,7 +138,21 @@ EOF
         ! ipset_has "$client" || fail 'ipset did not remove the managed element'
     fi
     "$binary" blocks reconcile
-    [[ "$(query_count "$client")" == 0 ]] || fail "$backend retained SQLite-only address"
+    if [[ "$backend" == nftables ]]; then
+        nft_has "$client" || fail 'nftables did not restore SQLite-only address'
+    else
+        ipset_has "$client" || fail 'ipset did not restore SQLite-only address'
+    fi
+    [[ "$(query_count "$client")" == 1 ]] || fail "$backend lost detected SQLite lease"
+
+    # An explicit unblock removes the address from both places.
+    "$binary" unblock "$client"
+    [[ "$(query_count "$client")" == 0 ]] || fail "$backend retained unblocked SQLite address"
+    if [[ "$backend" == nftables ]]; then
+        ! nft_has "$client" || fail 'nftables retained unblocked address'
+    else
+        ! ipset_has "$client" || fail 'ipset retained unblocked address'
+    fi
 
     # Timeout expiration also removes the SQLite row after the next reconcile.
     sleep 6

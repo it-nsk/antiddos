@@ -144,12 +144,37 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	isFirewallWhitelisted := func(ip netip.Addr, ruleID string) bool {
+		if ruleActions[ruleID] != config.RuleActionNFTables && ruleActions[ruleID] != config.RuleActionIPTables {
+			for _, ruleEngine := range ruleEngines {
+				if ruleEngine.IsIgnored(request.Event{IP: ip}) {
+					return true
+				}
+			}
+			return false
+		}
+		if source := ruleSource[ruleID]; source != "" {
+			if ruleEngine := ruleEngines[source]; ruleEngine != nil {
+				return ruleEngine.IsIgnoredForRule(ip, ruleID)
+			}
+		}
+		for _, ruleEngine := range ruleEngines {
+			if ruleEngine.IsIgnored(request.Event{IP: ip}) {
+				return true
+			}
+		}
+		return false
+	}
+	manager.SetWhitelist(isFirewallWhitelisted)
 	if config.UsesFirewall(cfg) {
 		result, err := manager.Reconcile(ctx, time.Now())
 		if err != nil {
 			logger.Error("reconcile managed firewall blocks", "error", err)
 		} else {
 			logger.Info("reconciled managed firewall blocks", "imported", result.Imported, "removed", result.Removed, "active", result.Active)
+			if err := manager.RemoveConfiguredWhitelist(ctx, func(result action.Result) { logBlockResult(logger, result, false) }); err != nil {
+				logger.Error("remove whitelisted firewall blocks", "error", err)
+			}
 		}
 	} else if err := manager.Cleanup(ctx, time.Now()); err != nil {
 		return fmt.Errorf("prune expired block records: %w", err)
@@ -241,6 +266,13 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 			Challenge: &challengeadmin.Client{},
 			Status:    webcontrol.Status{ConfigRevision: webConfig.Revision, StartedAt: time.Now(), BlockMode: cfg.BlockMode},
 			Reconcile: manager.ReconcileFirewall,
+			OnConfigSaved: func(ctx context.Context, document configservice.Document) error {
+				manager.SetWhitelist(whitelistFromDocument(document))
+				if !config.UsesFirewall(cfg) {
+					return nil
+				}
+				return manager.RemoveConfiguredWhitelist(ctx, func(result action.Result) { logBlockResult(logger, result, false) })
+			},
 		}
 		localServers++
 		go func() {
@@ -321,6 +353,8 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 				if config.UsesFirewall(cfg) {
 					if _, err := manager.Reconcile(blockCleanupCtx, now); err != nil {
 						logger.Error("reconcile managed firewall blocks", "error", err)
+					} else if err := manager.RemoveConfiguredWhitelist(blockCleanupCtx, func(result action.Result) { logBlockResult(logger, result, false) }); err != nil {
+						logger.Error("remove whitelisted firewall blocks", "error", err)
 					}
 				} else if err := manager.Cleanup(blockCleanupCtx, now); err != nil {
 					logger.Error("prune expired block records", "error", err)
@@ -519,6 +553,39 @@ readLoop:
 		logger.Warn("analysis excluded late requests", "late_events", statistics.lateEvents, "late_matching_requests", statistics.lateMatchingRequests)
 	}
 	return nil
+}
+
+func whitelistFromDocument(document configservice.Document) func(netip.Addr, string) bool {
+	parse := func(values []string) []netip.Prefix {
+		prefixes := make([]netip.Prefix, 0, len(values))
+		for _, value := range values {
+			if prefix, err := netip.ParsePrefix(value); err == nil {
+				prefixes = append(prefixes, prefix.Masked())
+			} else if ip, err := netip.ParseAddr(value); err == nil {
+				prefixes = append(prefixes, netip.PrefixFrom(ip.Unmap(), ip.Unmap().BitLen()))
+			}
+		}
+		return prefixes
+	}
+	global := parse(document.IgnoreIPs)
+	byRule := make(map[string][]netip.Prefix, len(document.Rules))
+	for _, rule := range document.Rules {
+		byRule[rule.ID] = parse(rule.IgnoreIPs)
+	}
+	return func(ip netip.Addr, ruleID string) bool {
+		ip = ip.Unmap()
+		for _, prefix := range global {
+			if prefix.Contains(ip) {
+				return true
+			}
+		}
+		for _, prefix := range byRule[ruleID] {
+			if prefix.Contains(ip) {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 func logBlockResult(logger *slog.Logger, result action.Result, dryRun bool) {

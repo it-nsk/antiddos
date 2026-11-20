@@ -29,6 +29,7 @@ type Manager struct {
 	active      map[netip.Addr]blockpolicy.ActiveBlock
 	activePeak  int
 	mapRebuilds int
+	whitelist   func(netip.Addr, string) bool
 }
 
 type ReconcileResult struct{ Imported, Removed, Active int }
@@ -138,14 +139,150 @@ func (manager *Manager) Reconcile(ctx context.Context, now time.Time) (Reconcile
 }
 
 func (manager *Manager) ReconcileFirewall(ctx context.Context) error {
-	_, err := manager.Reconcile(ctx, time.Now())
-	return err
+	if err := manager.Synchronize(ctx, time.Now()); err != nil {
+		return err
+	}
+	manager.mu.Lock()
+	whitelist := manager.whitelist
+	manager.mu.Unlock()
+	return manager.RemoveWhitelisted(ctx, whitelist, nil)
+}
+
+// SetWhitelist installs the daemon's current explicit whitelist for manual
+// two-way synchronization requests.
+func (manager *Manager) SetWhitelist(whitelist func(netip.Addr, string) bool) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.whitelist = whitelist
+}
+
+func (manager *Manager) RemoveConfiguredWhitelist(ctx context.Context, report func(action.Result)) error {
+	manager.mu.Lock()
+	whitelist := manager.whitelist
+	manager.mu.Unlock()
+	return manager.RemoveWhitelisted(ctx, whitelist, report)
+}
+
+// Synchronize is the explicit two-way operation: firewall-only leases are
+// imported into SQLite and SQLite-only leases are applied to the managed
+// firewall. Background reconciliation intentionally remains firewall-first.
+func (manager *Manager) Synchronize(ctx context.Context, now time.Time) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	reader, ok := manager.action.(action.ManagedBlockReader)
+	if !ok {
+		return fmt.Errorf("configured action cannot read managed firewall sets")
+	}
+	firewall, err := reader.ReadManagedBlocks(ctx)
+	if err != nil {
+		return fmt.Errorf("read managed firewall blocks: %w", err)
+	}
+	present := make(map[netip.Addr]action.ManagedBlock, len(firewall))
+	for _, block := range firewall {
+		if block.IP.IsValid() && block.ExpiresAt.After(now) {
+			present[block.IP.Unmap()] = block
+		}
+	}
+	leases, err := manager.store.UnexpiredBlocks(ctx, now)
+	if err != nil {
+		return fmt.Errorf("load SQLite blocks for synchronization: %w", err)
+	}
+	for _, lease := range leases {
+		ip := lease.IP.Unmap()
+		if _, exists := present[ip]; exists {
+			continue
+		}
+		// An imported lease has no backend/rule identity. Once absent from
+		// the firewall it must expire, not resurrect from SQLite.
+		if lease.Origin == "external" || (manager.whitelist != nil && manager.whitelist(ip, lease.RuleID)) {
+			continue
+		}
+		result := manager.action.Apply(ctx, action.BlockRequest{IP: ip, ExpiresAt: lease.ExpiresAt, RuleID: lease.RuleID})
+		if result.Status != action.StatusApplied && result.Status != action.StatusAlreadyActive && result.Status != action.StatusWouldApply {
+			return fmt.Errorf("apply SQLite block %s (status %s): %v", ip, result.Status, result.Err)
+		}
+	}
+	// Read back actual expirations: an existing nft element may retain its
+	// earlier timeout even when Apply reports that it is already active.
+	firewall, err = reader.ReadManagedBlocks(ctx)
+	if err != nil {
+		return fmt.Errorf("verify managed firewall blocks: %w", err)
+	}
+	present = make(map[netip.Addr]action.ManagedBlock, len(firewall))
+	for _, block := range firewall {
+		if block.IP.IsValid() && block.ExpiresAt.After(now) {
+			present[block.IP.Unmap()] = block
+		}
+	}
+	snapshot := make([]storage.FirewallBlock, 0, len(present))
+	for _, block := range present {
+		snapshot = append(snapshot, storage.FirewallBlock{IP: block.IP, ExpiresAt: block.ExpiresAt})
+	}
+	if _, _, err := manager.store.ReconcileFirewallBlocks(ctx, now, snapshot); err != nil {
+		return err
+	}
+	for ip, block := range present {
+		manager.rememberActive(blockpolicy.ActiveBlock{IP: ip, ExpiresAt: block.ExpiresAt})
+	}
+	for ip := range manager.active {
+		if _, ok := present[ip]; !ok {
+			delete(manager.active, ip)
+		}
+	}
+	manager.shrinkActiveIfNeeded()
+	return nil
+}
+
+// RemoveWhitelisted removes leases for addresses that an explicit current
+// whitelist exempts. The caller must reconcile successfully first: firewall
+// state normally remains authoritative, while a whitelist is a deliberate
+// operator override.
+func (manager *Manager) RemoveWhitelisted(ctx context.Context, isWhitelisted func(netip.Addr, string) bool, report func(action.Result)) error {
+	if isWhitelisted == nil {
+		return nil
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	leases, err := manager.store.UnexpiredBlocks(ctx, time.Now())
+	if err != nil {
+		return fmt.Errorf("load active blocks for whitelist: %w", err)
+	}
+	var failures []error
+	for _, lease := range leases {
+		ip := lease.IP.Unmap()
+		if !isWhitelisted(ip, lease.RuleID) {
+			continue
+		}
+		result := manager.action.Remove(ctx, ip)
+		if report != nil {
+			report(result)
+		}
+		if result.Status != action.StatusRemoved && result.Status != action.StatusAlreadyAbsent && result.Status != action.StatusWouldRemove {
+			failures = append(failures, fmt.Errorf("remove whitelisted IP %s (status %s): %v", ip, result.Status, result.Err))
+			continue
+		}
+		if err := manager.store.DeleteBlock(ctx, ip); err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		delete(manager.active, ip)
+	}
+	manager.shrinkActiveIfNeeded()
+	if len(failures) != 0 {
+		return fmt.Errorf("remove whitelisted blocks: %w", errors.Join(failures...))
+	}
+	return nil
 }
 
 // Process applies the policy to a detection and performs/persists an eligible block.
 func (manager *Manager) Process(ctx context.Context, detection engine.Detection, now time.Time) (action.Result, error) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if detection.GroupField == engine.GroupByIP && manager.whitelist != nil {
+		if ip, err := netip.ParseAddr(detection.GroupValue); err == nil && manager.whitelist(ip.Unmap(), detection.RuleID) {
+			return action.Result{Status: action.StatusSkipped, IP: ip.Unmap(), Reason: "address is whitelisted"}, nil
+		}
+	}
 	var current *blockpolicy.ActiveBlock
 	if detection.GroupField == engine.GroupByIP {
 		if ip, err := netip.ParseAddr(detection.GroupValue); err == nil {

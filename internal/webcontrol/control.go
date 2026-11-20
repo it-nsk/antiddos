@@ -37,11 +37,12 @@ type ConfigState struct {
 }
 
 type Service struct {
-	Config    *configservice.Service
-	Stats     *storage.Reader
-	Status    Status
-	Challenge *challengeadmin.Client
-	Reconcile func(context.Context) error
+	Config        *configservice.Service
+	Stats         *storage.Reader
+	Status        Status
+	Challenge     *challengeadmin.Client
+	Reconcile     func(context.Context) error
+	OnConfigSaved func(context.Context, configservice.Document) error
 }
 
 func (s *Service) state() (ConfigState, error) {
@@ -136,6 +137,12 @@ func (s *Service) handler() http.Handler {
 			}
 			writeError(w, status, err)
 			return
+		}
+		if s.OnConfigSaved != nil {
+			if err := s.OnConfigSaved(r.Context(), document); err != nil {
+				writeError(w, http.StatusServiceUnavailable, fmt.Errorf("configuration saved but whitelist reconciliation failed: %w", err))
+				return
+			}
 		}
 		restart := true
 		writeJSON(w, http.StatusOK, ConfigState{Config: document, Daemon: s.Status, DaemonAvailable: true, RestartRequired: &restart})

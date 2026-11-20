@@ -22,12 +22,19 @@ type testAction struct {
 }
 type readableAction struct {
 	testAction
-	blocks []action.ManagedBlock
-	err    error
+	blocks         []action.ManagedBlock
+	err            error
+	includeApplied bool
 }
 
 func (a *readableAction) ReadManagedBlocks(context.Context) ([]action.ManagedBlock, error) {
-	return a.blocks, a.err
+	blocks := append([]action.ManagedBlock(nil), a.blocks...)
+	if a.includeApplied {
+		for _, request := range a.apply {
+			blocks = append(blocks, action.ManagedBlock{IP: request.IP, ExpiresAt: request.ExpiresAt})
+		}
+	}
+	return blocks, a.err
 }
 
 func (a *testAction) Apply(_ context.Context, request action.BlockRequest) action.Result {
@@ -258,6 +265,86 @@ func TestReconcileReadFailureLeavesSQLiteUntouched(t *testing.T) {
 	rows, err := store.UnexpiredBlocks(context.Background(), now)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestRemoveWhitelistedRemovesFirewallAndSQLiteLease(t *testing.T) {
+	now := time.Now()
+	ip := netip.MustParseAddr("192.0.2.20")
+	backend := &readableAction{}
+	manager, store := newTestManager(t, backend)
+	if err := store.RecordBlock(context.Background(), ip, "homepage", now, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	manager.active[ip] = blockpolicy.ActiveBlock{IP: ip, ExpiresAt: now.Add(time.Minute)}
+	if err := manager.RemoveWhitelisted(context.Background(), func(got netip.Addr, ruleID string) bool {
+		return got == ip && ruleID == "homepage"
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(backend.remove) != 1 || backend.remove[0] != ip {
+		t.Fatalf("removed=%v", backend.remove)
+	}
+	rows, err := store.UnexpiredBlocks(context.Background(), now)
+	if err != nil || len(rows) != 0 || len(manager.Active()) != 0 {
+		t.Fatalf("rows=%+v active=%+v err=%v", rows, manager.Active(), err)
+	}
+}
+
+func TestSynchronizeAppliesSQLiteOnlyLeaseAndImportsFirewallLease(t *testing.T) {
+	now := time.Now()
+	fromDB := netip.MustParseAddr("192.0.2.21")
+	fromFirewall := netip.MustParseAddr("192.0.2.22")
+	backend := &readableAction{blocks: []action.ManagedBlock{{IP: fromFirewall, ExpiresAt: now.Add(time.Minute)}}, includeApplied: true}
+	manager, store := newTestManager(t, backend)
+	if err := store.RecordBlock(context.Background(), fromDB, "homepage", now, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Synchronize(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	if len(backend.apply) != 1 || backend.apply[0].IP != fromDB {
+		t.Fatalf("applied=%+v", backend.apply)
+	}
+	rows, err := store.UnexpiredBlocks(context.Background(), now)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestSynchronizeDoesNotRestoreExternalOrWhitelistedLease(t *testing.T) {
+	now := time.Now()
+	external := netip.MustParseAddr("192.0.2.31")
+	ignored := netip.MustParseAddr("192.0.2.32")
+	backend := &readableAction{}
+	manager, store := newTestManager(t, backend)
+	if _, _, err := store.ReconcileFirewallBlocks(context.Background(), now, []storage.FirewallBlock{{IP: external, ExpiresAt: now.Add(time.Minute)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordBlock(context.Background(), ignored, "homepage", now, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	manager.SetWhitelist(func(ip netip.Addr, _ string) bool { return ip == ignored })
+	if err := manager.ReconcileFirewall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(backend.apply) != 0 {
+		t.Fatalf("unexpected firewall applications: %+v", backend.apply)
+	}
+	rows, err := store.UnexpiredBlocks(context.Background(), now)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("stale SQLite leases: %+v, %v", rows, err)
+	}
+}
+
+func TestNewWhitelistPreventsDetectionBeforeRestart(t *testing.T) {
+	backend := &testAction{}
+	manager, _ := newTestManager(t, backend)
+	ip := netip.MustParseAddr("192.0.2.44")
+	manager.SetWhitelist(func(got netip.Addr, rule string) bool { return got == ip && rule == "homepage" })
+	result, err := manager.Process(context.Background(), engine.Detection{RuleID: "homepage", GroupField: engine.GroupByIP, GroupValue: ip.String()}, time.Now())
+	if err != nil || result.Status != action.StatusSkipped || len(backend.apply) != 0 {
+		t.Fatalf("result=%+v applies=%+v err=%v", result, backend.apply, err)
 	}
 }
 
