@@ -147,7 +147,7 @@ func (store *Store) RewriteHistoricalRule(ctx context.Context, resultPath, impor
 	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO detections(log_source,event_time_unix_ns,event_time_text,recorded_at_unix_ms,rule_id,grouping_id,group_values_json,trigger_ip,trigger_user_agent,method,path,raw_query,protocol,raw_event,reason,status,request_count,window_millis,threshold,dry_run)
 		SELECT d.log_source,d.event_time_unix_ns,d.event_time_text,d.recorded_at_unix_ms,d.rule_id,d.grouping_id,d.group_values_json,d.trigger_ip,d.trigger_user_agent,d.method,d.path,d.raw_query,d.protocol,d.raw_event,d.reason,d.status,d.request_count,d.window_millis,d.threshold,d.dry_run
-		FROM historical_result.detections d JOIN historical_result.history_detection_provenance p ON p.detection_id=d.id WHERE p.import_id=? AND d.rule_id=? ORDER BY d.id`, importID, ruleID)
+		FROM historical_result.detections d JOIN historical_result.history_detection_provenance p ON p.detection_id=d.id WHERE p.import_id=? AND d.rule_id=? AND d.event_time_unix_ns>=? AND d.event_time_unix_ns<? ORDER BY d.id`, importID, ruleID, from.UnixNano(), to.UnixNano())
 	if err != nil {
 		return 0, err
 	}
@@ -161,7 +161,7 @@ func (store *Store) RewriteHistoricalRule(ctx context.Context, resultPath, impor
 			return 0, err
 		}
 		first := last - count + 1
-		if _, err := tx.ExecContext(ctx, `INSERT INTO history_detection_provenance(import_id,detection_id) SELECT ?, ? + ROW_NUMBER() OVER (ORDER BY detection_id) - 1 FROM historical_result.history_detection_provenance p JOIN historical_result.detections d ON d.id=p.detection_id WHERE p.import_id=? AND d.rule_id=? ORDER BY d.id`, importID, first, importID, ruleID); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO history_detection_provenance(import_id,detection_id) SELECT ?, ? + ROW_NUMBER() OVER (ORDER BY detection_id) - 1 FROM historical_result.history_detection_provenance p JOIN historical_result.detections d ON d.id=p.detection_id WHERE p.import_id=? AND d.rule_id=? AND d.event_time_unix_ns>=? AND d.event_time_unix_ns<? ORDER BY d.id`, importID, first, importID, ruleID, from.UnixNano(), to.UnixNano()); err != nil {
 			return 0, err
 		}
 	}
