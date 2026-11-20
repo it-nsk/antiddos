@@ -26,6 +26,7 @@ const historyUsage = `Usage:
   antiddos history report --database FILE
   antiddos history detections --database FILE [--limit N] [--before ID] [--from RFC3339 --to RFC3339]
   antiddos history publish --config FILE --database FILE --confirm-import ID
+  antiddos history rewrite-rule --config FILE --database FILE --confirm-import ID --rule ID --from RFC3339 --to RFC3339
   antiddos history preflight --database FILE --database FILE [--database FILE...]
   antiddos history catalog list --catalog FILE
   antiddos history catalog coverage --catalog FILE --source ID --from RFC3339 --to RFC3339
@@ -63,6 +64,9 @@ func historyCommand(ctx context.Context, args []string, out io.Writer) error {
 	}
 	if args[0] == "publish" {
 		return historyPublishCommand(ctx, args[1:], out)
+	}
+	if args[0] == "rewrite-rule" {
+		return historyRewriteRuleCommand(ctx, args[1:], out)
 	}
 	if args[0] == "preflight" {
 		return historyPreflightCommand(ctx, args[1:], out)
@@ -304,6 +308,53 @@ func historyPublishCommand(ctx context.Context, args []string, out io.Writer) er
 		return err
 	}
 	_, err = fmt.Fprintf(out, "Published historical result: import=%s source=%s period=[%s, %s) traffic samples=%d detections=%d; no actions, blocks, or soft-block decisions were created.\n", result.Entry.ImportID, result.Entry.SourceID, formatHistoryTime(result.Entry.From), formatHistoryTime(result.Entry.To), result.TrafficSamples, result.Detections)
+	return err
+}
+
+func historyRewriteRuleCommand(ctx context.Context, args []string, out io.Writer) error {
+	var configPath, resultPath, importID, ruleID, fromText, toText string
+	flags := flag.NewFlagSet("history rewrite-rule", flag.ContinueOnError)
+	flags.SetOutput(out)
+	flags.StringVar(&configPath, "config", config.DefaultPath, "configured target database")
+	flags.StringVar(&resultPath, "database", "", "completed isolated historical result SQLite path")
+	flags.StringVar(&importID, "confirm-import", "", "exact immutable import ID")
+	flags.StringVar(&ruleID, "rule", "", "configured rule ID to replace")
+	flags.StringVar(&fromText, "from", "", "replacement start, inclusive (RFC3339)")
+	flags.StringVar(&toText, "to", "", "replacement end, exclusive (RFC3339)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || resultPath == "" || importID == "" || ruleID == "" {
+		return fmt.Errorf("usage: antiddos history rewrite-rule --config FILE --database FILE --confirm-import ID --rule ID --from RFC3339 --to RFC3339")
+	}
+	from, to, err := parseHistoryPeriod(fromText, toText)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	sourceID := ""
+	for _, rule := range cfg.Engine.Rules {
+		if rule.ID == ruleID {
+			sourceID = rule.LogSource
+			break
+		}
+	}
+	if sourceID == "" {
+		return fmt.Errorf("configured rule %q not found", ruleID)
+	}
+	store, err := storage.OpenHistoricalPublisher(cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	count, err := store.RewriteHistoricalRule(ctx, resultPath, importID, sourceID, ruleID, from, to)
+	if err != nil {
+		return fmt.Errorf("rewrite historical rule: %w", err)
+	}
+	_, err = fmt.Fprintf(out, "Rewrote historical detections: rule=%s source=%s period=[%s, %s) detections=%d; traffic aggregates were preserved.\n", ruleID, sourceID, formatHistoryTime(from), formatHistoryTime(to), count)
 	return err
 }
 

@@ -96,6 +96,81 @@ type HistoryPublishResult struct {
 	TrafficSamples   int64
 }
 
+// RewriteHistoricalRule replaces only historical detections for one rule. It
+// deliberately leaves traffic aggregates untouched: a rule edit changes which
+// requests match, but cannot safely reconstruct any live contribution already
+// present in an aggregate bucket.
+func (store *Store) RewriteHistoricalRule(ctx context.Context, resultPath, importID, sourceID, ruleID string, from, to time.Time) (int64, error) {
+	if !filepath.IsAbs(resultPath) || importID == "" || sourceID == "" || ruleID == "" || !from.Before(to) {
+		return 0, fmt.Errorf("absolute result path, import, source, rule, and ordered period are required")
+	}
+	if _, err := store.db.ExecContext(ctx, `ATTACH DATABASE ? AS historical_result`, resultPath); err != nil {
+		return 0, fmt.Errorf("attach historical result: %w", err)
+	}
+	defer store.db.ExecContext(context.Background(), `DETACH DATABASE historical_result`)
+	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var imports int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM historical_result.history_imports WHERE id=? AND source_id=?`, importID, sourceID).Scan(&imports); err != nil {
+		return 0, err
+	}
+	if imports != 1 {
+		return 0, fmt.Errorf("historical result does not contain the expected import")
+	}
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_imports WHERE id=?`, importID).Scan(&exists); err != nil {
+		return 0, err
+	}
+	if exists != 0 {
+		return 0, fmt.Errorf("historical rule result %s is already published", importID)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE history_rule_replace AS
+		SELECT p.detection_id FROM history_detection_provenance p JOIN detections d ON d.id=p.detection_id
+		WHERE d.log_source=? AND d.rule_id=? AND d.event_time_unix_ns>=? AND d.event_time_unix_ns<?`, sourceID, ruleID, from.UnixNano(), to.UnixNano()); err != nil {
+		return 0, err
+	}
+	defer tx.ExecContext(context.Background(), `DROP TABLE IF EXISTS history_rule_replace`)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM history_detection_provenance WHERE detection_id IN (SELECT detection_id FROM history_rule_replace)`); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM detections WHERE id IN (SELECT detection_id FROM history_rule_replace)`); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO history_imports SELECT * FROM historical_result.history_imports WHERE id=?`, importID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO history_coverage SELECT * FROM historical_result.history_coverage WHERE import_id=?`, importID); err != nil {
+		return 0, err
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO detections(log_source,event_time_unix_ns,event_time_text,recorded_at_unix_ms,rule_id,grouping_id,group_values_json,trigger_ip,trigger_user_agent,method,path,raw_query,protocol,raw_event,reason,status,request_count,window_millis,threshold,dry_run)
+		SELECT d.log_source,d.event_time_unix_ns,d.event_time_text,d.recorded_at_unix_ms,d.rule_id,d.grouping_id,d.group_values_json,d.trigger_ip,d.trigger_user_agent,d.method,d.path,d.raw_query,d.protocol,d.raw_event,d.reason,d.status,d.request_count,d.window_millis,d.threshold,d.dry_run
+		FROM historical_result.detections d JOIN historical_result.history_detection_provenance p ON p.detection_id=d.id WHERE p.import_id=? AND d.rule_id=? ORDER BY d.id`, importID, ruleID)
+	if err != nil {
+		return 0, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if count > 0 {
+		last, err := result.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+		first := last - count + 1
+		if _, err := tx.ExecContext(ctx, `INSERT INTO history_detection_provenance(import_id,detection_id) SELECT ?, ? + ROW_NUMBER() OVER (ORDER BY detection_id) - 1 FROM historical_result.history_detection_provenance p JOIN historical_result.detections d ON d.id=p.detection_id WHERE p.import_id=? AND d.rule_id=? ORDER BY d.id`, importID, first, importID, ruleID); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // PublishHistoricalResult appends one verified isolated result. Existing live
 // data in the requested source-period is a conflict, not something to merge:
 // this prevents silently doubling dashboard buckets.
