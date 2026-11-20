@@ -50,12 +50,19 @@ type DashboardBlock struct {
 	ExpiresAt int64  `json:"expires_at"`
 	Origin    string `json:"origin"`
 }
+type RuleDetectionPoint struct {
+	Rule     string `json:"rule"`
+	SourceID string `json:"source_id"`
+	Time     int64  `json:"time"`
+	Count    int64  `json:"count"`
+}
 type Dashboard struct {
 	From           int64                `json:"from"`
 	To             int64                `json:"to"`
 	UpdatedAt      int64                `json:"updated_at"`
 	Points         []TrafficPoint       `json:"points"`
 	SourcePoints   []SourceTraffic      `json:"source_points"`
+	RulePoints     []RuleDetectionPoint `json:"rule_points"`
 	Detections     []DashboardDetection `json:"detections"`
 	Blocks         []DashboardBlock     `json:"blocks"`
 	DetectionCount int64                `json:"detection_count"`
@@ -71,7 +78,7 @@ type SourceTraffic struct {
 // Dashboard returns a consistent, bounded snapshot. Traffic is aggregated across all sources.
 // Detections are events, not proof that an enforcement action was applied.
 func (r *Reader) Dashboard(ctx context.Context, from, to time.Time, before int64, limit int) (Dashboard, error) {
-	d := Dashboard{From: from.Unix(), To: to.Unix(), UpdatedAt: time.Now().Unix(), Points: []TrafficPoint{}, SourcePoints: []SourceTraffic{}, Detections: []DashboardDetection{}, Blocks: []DashboardBlock{}}
+	d := Dashboard{From: from.Unix(), To: to.Unix(), UpdatedAt: time.Now().Unix(), Points: []TrafficPoint{}, SourcePoints: []SourceTraffic{}, RulePoints: []RuleDetectionPoint{}, Detections: []DashboardDetection{}, Blocks: []DashboardBlock{}}
 	span := d.To - d.From
 	if d.From < 0 || span < 15 || limit < 1 || limit > 1000 || before < 0 {
 		return d, fmt.Errorf("range must be at least 15 seconds; limit 1–1000; cursor nonnegative")
@@ -144,6 +151,27 @@ func (r *Reader) Dashboard(ctx context.Context, from, to time.Time, before int64
 		return d, err
 	}
 	if err := sourceDetectionRows.Close(); err != nil {
+		return d, err
+	}
+	ruleDetectionRows, err := tx.QueryContext(ctx, `SELECT rule_id,log_source,((event_time_unix_ns / 1000000000) / ?) * ?,COUNT(*)
+		FROM detections WHERE event_time_unix_ns>=? AND event_time_unix_ns<? GROUP BY 1,2,3 ORDER BY 1,2,3`, step, step, from.UnixNano(), to.UnixNano())
+	if err != nil {
+		return d, err
+	}
+	for ruleDetectionRows.Next() {
+		var point RuleDetectionPoint
+		if err := ruleDetectionRows.Scan(&point.Rule, &point.SourceID, &point.Time, &point.Count); err != nil {
+			ruleDetectionRows.Close()
+			return d, err
+		}
+		point.Time = max(point.Time, d.From)
+		d.RulePoints = append(d.RulePoints, point)
+	}
+	if err := ruleDetectionRows.Err(); err != nil {
+		ruleDetectionRows.Close()
+		return d, err
+	}
+	if err := ruleDetectionRows.Close(); err != nil {
 		return d, err
 	}
 	for sourceID, buckets := range sourceBuckets {

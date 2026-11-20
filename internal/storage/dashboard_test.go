@@ -51,6 +51,9 @@ func TestDashboardRangeAggregationPagination(t *testing.T) {
 	if req != 30 || matched != 12 || bytes != 600 || known != 15 || d.DetectionCount != 4 || len(d.Detections) != 2 || d.NextBefore == 0 || d.BlockCount != 1 {
 		t.Fatalf("wrong snapshot: %+v totals %d %d %d %d", d, req, matched, bytes, known)
 	}
+	if len(d.RulePoints) != 1 || d.RulePoints[0].Rule != "home" || d.RulePoints[0].Count != 4 {
+		t.Fatalf("wrong rule aggregation: %+v", d.RulePoints)
+	}
 	next, err := reader.Dashboard(ctx, base, base.Add(time.Hour), d.NextBefore, 2)
 	if err != nil {
 		t.Fatal(err)

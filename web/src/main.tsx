@@ -522,18 +522,11 @@ function Workspace({
   const ruleSeriesFor = (chartPoints: Point[], sourceId?: string) => {
     if (!data) return [];
     const counts = new Map<string, Map<number, number>>();
-    for (const detection of data.detections) {
-      if (sourceId !== undefined && detection.source_id !== sourceId) continue;
-      const timestamp = new Date(detection.event_time).getTime() / 1000;
-      const point = chartPoints.find(
-        (candidate) =>
-          timestamp >= candidate.time &&
-          timestamp < candidate.time + candidate.interval,
-      );
-      if (!point) continue;
-      const values = counts.get(detection.rule) || new Map<number, number>();
-      values.set(point.time, (values.get(point.time) || 0) + 1);
-      counts.set(detection.rule, values);
+    for (const sample of data.rule_points) {
+      if (sourceId !== undefined && sample.source_id !== sourceId) continue;
+      const values = counts.get(sample.rule) || new Map<number, number>();
+      values.set(sample.time, (values.get(sample.time) || 0) + sample.count);
+      counts.set(sample.rule, values);
     }
     return [...counts.keys()]
       .sort()
