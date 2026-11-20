@@ -65,6 +65,7 @@ type BlockRow struct {
 	RuleID    string
 	StartedAt time.Time
 	ExpiresAt time.Time
+	Origin    string
 }
 
 func (r *Reader) ActiveBlocks(ctx context.Context, now time.Time, limit int) ([]BlockRow, error) {
@@ -79,7 +80,7 @@ type rowsQuerier interface {
 }
 
 func queryActiveBlocks(ctx context.Context, db rowsQuerier, now time.Time, limit int) ([]BlockRow, error) {
-	query := `SELECT ip, rule_id, started_at_unix_ms, expires_at_unix_ms
+	query := `SELECT ip, rule_id, started_at_unix_ms, expires_at_unix_ms, origin
 		FROM active_blocks WHERE expires_at_unix_ms > ?
 		ORDER BY expires_at_unix_ms DESC, ip`
 	var rows *sql.Rows
@@ -98,7 +99,7 @@ func queryActiveBlocks(ctx context.Context, db rowsQuerier, now time.Time, limit
 		var row BlockRow
 		var ip string
 		var startedAt, expiresAt int64
-		if err := rows.Scan(&ip, &row.RuleID, &startedAt, &expiresAt); err != nil {
+		if err := rows.Scan(&ip, &row.RuleID, &startedAt, &expiresAt, &row.Origin); err != nil {
 			return nil, err
 		}
 		address, err := netip.ParseAddr(ip)

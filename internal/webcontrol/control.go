@@ -41,6 +41,7 @@ type Service struct {
 	Stats     *storage.Reader
 	Status    Status
 	Challenge *challengeadmin.Client
+	Reconcile func(context.Context) error
 }
 
 func (s *Service) state() (ConfigState, error) {
@@ -156,6 +157,21 @@ func (s *Service) handler() http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, data)
+	})
+	mux.HandleFunc("POST /v1/blocks/reconcile", func(w http.ResponseWriter, r *http.Request) {
+		if s.Reconcile == nil {
+			writeError(w, http.StatusServiceUnavailable, fmt.Errorf("firewall reconciliation unavailable"))
+			return
+		}
+		if r.ContentLength > 0 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("request body must be empty"))
+			return
+		}
+		if err := s.Reconcile(r.Context()); err != nil {
+			writeError(w, http.StatusServiceUnavailable, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "reconciled"})
 	})
 	return mux
 }
@@ -310,6 +326,10 @@ func (c *Client) SaveRules(ctx context.Context, update configservice.Update) (Co
 	var result ConfigState
 	err := c.request(ctx, http.MethodPut, "/v1/config/rules", update, &result)
 	return result, err
+}
+func (c *Client) ReconcileBlocks(ctx context.Context) error {
+	var result map[string]string
+	return c.request(ctx, http.MethodPost, "/v1/blocks/reconcile", nil, &result)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

@@ -102,3 +102,17 @@ type Action interface {
 	Apply(context.Context, BlockRequest) Result
 	Remove(context.Context, netip.Addr) Result
 }
+
+// ManagedBlock is an element read from an AntiDDoS-owned firewall set.  It is
+// deliberately an address/lease only: firewall state cannot tell which
+// detection rule originally created an element.
+type ManagedBlock struct {
+	IP        netip.Addr
+	ExpiresAt time.Time
+}
+
+// ManagedBlockReader is implemented only by firewall backends.  It must read
+// exclusively objects owned by AntiDDoS and must not alter firewall state.
+type ManagedBlockReader interface {
+	ReadManagedBlocks(context.Context) ([]ManagedBlock, error)
+}

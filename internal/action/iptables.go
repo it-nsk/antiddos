@@ -29,6 +29,67 @@ type IPTables struct {
 	now             func() time.Time
 }
 
+// ReadManagedBlocks uses ipset save on exactly the two namespaced set names;
+// it does not enumerate or inspect any foreign ipset.
+func (iptables *IPTables) ReadManagedBlocks(ctx context.Context) ([]ManagedBlock, error) {
+	if iptables == nil {
+		return nil, fmt.Errorf("iptables action is not configured")
+	}
+	now := time.Now()
+	if iptables.now != nil {
+		now = iptables.now()
+	}
+	var result []ManagedBlock
+	for _, set := range []string{IPSetIPv4, IPSetIPv6} {
+		output, err := iptables.command(ctx, iptables.ipsetBinary(), "save", set)
+		if err != nil {
+			return nil, commandError("read managed ipset "+set, err, output)
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				continue
+			}
+			// ipset versions may print a membership diagnostic to stdout while
+			// serving `save <set>`. It is not a save command and has no state.
+			if fields[0] == "create" {
+				if len(fields) < 3 || fields[1] != set || fields[2] != "hash:ip" {
+					return nil, fmt.Errorf("unexpected set definition while reading managed ipset %s", set)
+				}
+				continue
+			}
+			if fields[0] != "add" {
+				if strings.HasPrefix(strings.ToLower(line), "warning:") || strings.HasPrefix(strings.ToLower(line), "error:") {
+					continue
+				}
+				return nil, fmt.Errorf("unexpected output while reading managed ipset %s: %s", set, line)
+			}
+			if len(fields) < 5 || fields[1] != set {
+				return nil, fmt.Errorf("unexpected entry while reading managed ipset %s", set)
+			}
+			ip, e := netip.ParseAddr(fields[2])
+			if e != nil {
+				return nil, fmt.Errorf("invalid address %q in managed ipset", fields[2])
+			}
+			timeout := -1
+			for i := 3; i+1 < len(fields); i++ {
+				if fields[i] == "timeout" {
+					timeout, e = strconv.Atoi(fields[i+1])
+					if e != nil {
+						return nil, fmt.Errorf("invalid timeout for %s", ip)
+					}
+					break
+				}
+			}
+			if timeout < 1 {
+				return nil, fmt.Errorf("managed ipset entry %s has no usable timeout", ip)
+			}
+			result = append(result, ManagedBlock{IP: ip.Unmap(), ExpiresAt: now.Add(time.Duration(timeout) * time.Second)})
+		}
+	}
+	return result, nil
+}
+
 func (iptables *IPTables) Apply(ctx context.Context, request BlockRequest) Result {
 	if err := ctx.Err(); err != nil {
 		return Result{Status: StatusFailed, IP: request.IP, Err: err}

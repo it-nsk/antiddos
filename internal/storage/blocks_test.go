@@ -91,3 +91,27 @@ func TestRecordBlockRejectsInvalidLease(t *testing.T) {
 		t.Fatal("invalid IP was accepted")
 	}
 }
+
+func TestRecordBlockMarksFirewallImportAsDetected(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	ip := netip.MustParseAddr("192.0.2.10")
+	if _, _, err := store.ReconcileFirewallBlocks(ctx, now, []FirewallBlock{{IP: ip, ExpiresAt: now.Add(time.Minute)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordBlock(ctx, ip, "rate-limit", now, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := store.UnexpiredBlocks(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || blocks[0].Origin != "detected" || blocks[0].RuleID != "rate-limit" {
+		t.Fatalf("blocks = %+v, want detected record", blocks)
+	}
+}

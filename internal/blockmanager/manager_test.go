@@ -2,6 +2,7 @@ package blockmanager
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"path/filepath"
 	"testing"
@@ -18,6 +19,15 @@ type testAction struct {
 	remove       []netip.Addr
 	applyStatus  action.Status
 	removeStatus action.Status
+}
+type readableAction struct {
+	testAction
+	blocks []action.ManagedBlock
+	err    error
+}
+
+func (a *readableAction) ReadManagedBlocks(context.Context) ([]action.ManagedBlock, error) {
+	return a.blocks, a.err
 }
 
 func (a *testAction) Apply(_ context.Context, request action.BlockRequest) action.Result {
@@ -206,5 +216,64 @@ func TestCleanupRebuildsActiveMapAfterLargeExpiryBurst(t *testing.T) {
 	}
 	if manager.mapRebuilds != 1 || manager.activePeak != 0 {
 		t.Fatalf("map rebuilds = %d, peak = %d; want one rebuild and reset peak", manager.mapRebuilds, manager.activePeak)
+	}
+}
+
+func TestReconcileImportsFirewallAndRemovesAbsentSQLite(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	present := netip.MustParseAddr("192.0.2.8")
+	absent := netip.MustParseAddr("192.0.2.9")
+	backend := &readableAction{blocks: []action.ManagedBlock{{IP: present, ExpiresAt: now.Add(time.Minute)}}}
+	manager, store := newTestManager(t, backend)
+	if err := store.RecordBlock(context.Background(), absent, "detected-rule", now, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.Reconcile(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Imported != 1 || result.Removed != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	rows, err := store.UnexpiredBlocks(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].IP != present || rows[0].Origin != "external" || rows[0].RuleID != "external-firewall" {
+		t.Fatalf("rows=%+v", rows)
+	}
+}
+
+func TestReconcileReadFailureLeavesSQLiteUntouched(t *testing.T) {
+	now := time.Now()
+	ip := netip.MustParseAddr("192.0.2.9")
+	backend := &readableAction{err: errors.New("cannot read managed set")}
+	manager, store := newTestManager(t, backend)
+	if err := store.RecordBlock(context.Background(), ip, "detected-rule", now, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Reconcile(context.Background(), now); err == nil {
+		t.Fatal("expected read error")
+	}
+	rows, err := store.UnexpiredBlocks(context.Background(), now)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestReconcileReplacesExpiredSQLiteLeaseStillPresentInFirewall(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	ip := netip.MustParseAddr("192.0.2.10")
+	backend := &readableAction{blocks: []action.ManagedBlock{{IP: ip, ExpiresAt: now.Add(time.Minute)}}}
+	manager, store := newTestManager(t, backend)
+	if err := store.RecordBlock(context.Background(), ip, "old-rule", now.Add(-2*time.Minute), now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Reconcile(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.UnexpiredBlocks(context.Background(), now)
+	if err != nil || len(rows) != 1 || rows[0].Origin != "external" || rows[0].RuleID != "external-firewall" {
+		t.Fatalf("rows=%+v err=%v", rows, err)
 	}
 }

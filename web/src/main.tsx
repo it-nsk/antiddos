@@ -1019,7 +1019,7 @@ function Workspace({
                 </details>
               </section>
             )}
-            <Blocks data={data} rules={config?.config.rules ?? []} />
+            <Blocks data={data} rules={config?.config.rules ?? []} admin={admin} onReconcile={() => api("blocks/reconcile",{method:"POST",headers:{"X-CSRF-Token":session.csrf}}).then(()=>setRefresh(v=>v+1)).catch(report)} />
             <section className="panel">
               <details>
                 <summary>Все показатели трафика по интервалам</summary>
@@ -1069,7 +1069,7 @@ function Workspace({
         )}
         {page === "detections" && data && (
           <>
-            <Blocks data={data} rules={config?.config.rules ?? []} />
+            <Blocks data={data} rules={config?.config.rules ?? []} admin={admin} onReconcile={() => api("blocks/reconcile",{method:"POST",headers:{"X-CSRF-Token":session.csrf}}).then(()=>setRefresh(v=>v+1)).catch(report)} />
             <section className="panel">
               <div className="panel-head">
                 <h2>
@@ -1968,7 +1968,7 @@ function SoftBlockPanel({ rows }: { rows: SoftBlock[] | null }) {
     </section>
   );
 }
-function Blocks({ data, rules }: { data: Dashboard; rules: Config["rules"] }) {
+function Blocks({ data, rules, admin, onReconcile }: { data: Dashboard; rules: Config["rules"]; admin:boolean; onReconcile:()=>void }) {
   const sourceByRule = new Map(rules.map((rule) => [rule.id, rule.log_source]));
   return (
     <section className="panel">
@@ -1977,6 +1977,7 @@ function Blocks({ data, rules }: { data: Dashboard; rules: Config["rules"] }) {
           Активные блокировки <span className="badge">{data.block_count}</span>
         </h2>
         <span>На текущий момент · до 1000 адресов</span>
+		{admin && <button type="button" onClick={onReconcile}>Синхронизировать блокировки с firewall</button>}
       </div>
       {data.blocks.length ? (
         <div className="table-wrap">
@@ -1986,6 +1987,7 @@ function Blocks({ data, rules }: { data: Dashboard; rules: Config["rules"] }) {
                 <th>IP</th>
                 <th>Источник лога</th>
                 <th>Правило</th>
+				<th>Происхождение</th>
                 <th>Заблокирован</th>
                 <th>Истекает</th>
                 <th>Осталось</th>
@@ -1999,6 +2001,7 @@ function Blocks({ data, rules }: { data: Dashboard; rules: Config["rules"] }) {
                   </td>
                   <td>{sourceByRule.get(b.rule) || "источник неизвестен"}</td>
                   <td>{b.rule}</td>
+				  <td>{b.origin === "external" ? "Внешний firewall" : "Обнаружение AntiDDoS"}</td>
                   <td>{dt(b.started_at)}</td>
                   <td>{dt(b.expires_at)}</td>
                   <td>{Math.max(0, b.expires_at - data.updated_at)} с</td>

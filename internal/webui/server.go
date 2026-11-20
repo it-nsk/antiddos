@@ -47,6 +47,7 @@ type Backend interface {
 	ChallengeStatus(context.Context) (challengeadmin.Status, error)
 	ChallengeMetrics(context.Context, time.Time, time.Time, int) ([]challengeadmin.Metric, error)
 	SoftBlocks(context.Context, int) ([]storage.SoftBlockLease, error)
+	ReconcileBlocks(context.Context) error
 }
 
 type Server struct {
@@ -117,6 +118,7 @@ func New(o Options, auth *webauth.Store, backend Backend, logger *slog.Logger) (
 	mux.HandleFunc("GET /api/session", s.protected(false, func(w http.ResponseWriter, r *http.Request, v webauth.Session) { writeJSON(w, 200, v) }))
 	mux.HandleFunc("POST /api/logout", s.protected(false, s.logout))
 	mux.HandleFunc("GET /api/dashboard", s.protected(false, s.dashboard))
+	mux.HandleFunc("POST /api/blocks/reconcile", s.protected(true, s.reconcileBlocks))
 	mux.HandleFunc("GET /api/challenge/status", s.protected(false, s.challengeStatus))
 	mux.HandleFunc("GET /api/challenge/metrics", s.protected(false, s.challengeMetrics))
 	mux.HandleFunc("GET /api/soft-blocks", s.protected(false, s.softBlocks))
@@ -522,6 +524,14 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, v webauth.Ses
 		return
 	}
 	writeJSON(w, 200, data)
+}
+
+func (s *Server) reconcileBlocks(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
+	if err := s.backend.ReconcileBlocks(r.Context()); err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "reconciled"})
 }
 func (s *Server) softBlocks(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
 	if r.URL.RawQuery != "" {

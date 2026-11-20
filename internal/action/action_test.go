@@ -384,3 +384,52 @@ func TestResultValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestNFTablesReadManagedBlocksReadsOnlyOwnedSets(t *testing.T) {
+	var calls [][]string
+	backend := NFTables{Binary: "nft-test", now: func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }, run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		calls = append(calls, args)
+		if reflect.DeepEqual(args, []string{"-j", "list", "table", NftFamily, NftTable}) {
+			return []byte(`{"nftables":[{"table":{"family":"inet","name":"antiddos","comment":"managed by antiddos"}}]}`), nil
+		}
+		return []byte(`{"nftables":[{"set":{"elem":[{"val":"192.0.2.1","expires":30}]}}]}`), nil
+	}}
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	blocks, err := backend.ReadManagedBlocks(context.Background())
+	if err != nil || len(blocks) != 2 {
+		t.Fatalf("blocks=%+v err=%v", blocks, err)
+	}
+	if !blocks[0].ExpiresAt.Equal(now.Add(30 * time.Second)) {
+		t.Fatalf("expiry=%s, want %s", blocks[0].ExpiresAt, now.Add(30*time.Second))
+	}
+	if !reflect.DeepEqual(calls[0], []string{"-j", "list", "table", NftFamily, NftTable}) {
+		t.Fatalf("owned-table check = %q", calls[0])
+	}
+	for _, call := range calls[1:] {
+		if !reflect.DeepEqual(call[:4], []string{"-j", "list", "set", NftFamily}) || call[4] != NftTable || (call[5] != NftIPv4Set && call[5] != NftIPv6Set) {
+			t.Fatalf("foreign/unexpected nft read: %q", call)
+		}
+	}
+}
+
+func TestNFTablesReadManagedBlocksRejectsUnownedTable(t *testing.T) {
+	backend := NFTables{run: func(context.Context, string, ...string) ([]byte, error) {
+		return []byte(`{"nftables":[{"table":{"family":"inet","name":"antiddos"}}]}`), nil
+	}}
+	if _, err := backend.ReadManagedBlocks(context.Background()); err == nil {
+		t.Fatal("unowned table was accepted")
+	}
+}
+
+func TestNFTTableOwnershipDoesNotAcceptChildComment(t *testing.T) {
+	if nftTableIsOwned([]byte(`{"nftables":[{"table":{"family":"inet","name":"antiddos","comment":"other"}},{"rule":{"comment":"managed by antiddos"}}]}`)) {
+		t.Fatal("child comment was accepted as table ownership")
+	}
+}
+
+func TestParseNFTSetJSONAcceptsEmptySetWithoutElemField(t *testing.T) {
+	blocks, err := parseNFTSetJSON([]byte(`{"nftables":[{"set":{"family":"inet","table":"antiddos","name":"blocked_ipv6"}}]}`), time.Now())
+	if err != nil || len(blocks) != 0 {
+		t.Fatalf("blocks=%+v err=%v", blocks, err)
+	}
+}

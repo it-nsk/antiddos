@@ -31,6 +31,8 @@ type Manager struct {
 	mapRebuilds int
 }
 
+type ReconcileResult struct{ Imported, Removed, Active int }
+
 func New(policy *blockpolicy.Policy, duration time.Duration, blockAction action.Action, store *storage.Store) (*Manager, error) {
 	if policy == nil || blockAction == nil || store == nil {
 		return nil, fmt.Errorf("block manager requires policy, action, and storage")
@@ -91,6 +93,53 @@ func (manager *Manager) Restore(ctx context.Context, isWhitelisted func(netip.Ad
 		return fmt.Errorf("restore active blocks: %w", errors.Join(failures...))
 	}
 	return nil
+}
+
+// Reconcile makes the managed firewall sets authoritative. Reading completes
+// before any SQLite mutation, so a failed firewall read can never erase a
+// lease. It never applies or removes firewall elements.
+func (manager *Manager) Reconcile(ctx context.Context, now time.Time) (ReconcileResult, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	reader, ok := manager.action.(action.ManagedBlockReader)
+	if !ok {
+		return ReconcileResult{}, fmt.Errorf("configured action cannot read managed firewall sets")
+	}
+	firewall, err := reader.ReadManagedBlocks(ctx)
+	if err != nil {
+		return ReconcileResult{}, fmt.Errorf("read managed firewall blocks: %w", err)
+	}
+	present := make(map[netip.Addr]action.ManagedBlock, len(firewall))
+	for _, block := range firewall {
+		if !block.IP.IsValid() || !block.ExpiresAt.After(now) {
+			continue
+		}
+		present[block.IP.Unmap()] = block
+	}
+	snapshot := make([]storage.FirewallBlock, 0, len(present))
+	for _, block := range present {
+		snapshot = append(snapshot, storage.FirewallBlock{IP: block.IP, ExpiresAt: block.ExpiresAt})
+	}
+	imported, removed, err := manager.store.ReconcileFirewallBlocks(ctx, now, snapshot)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
+	result := ReconcileResult{Imported: imported, Removed: removed, Active: len(present)}
+	for ip, block := range present {
+		manager.rememberActive(blockpolicy.ActiveBlock{IP: ip, ExpiresAt: block.ExpiresAt})
+	}
+	for ip := range manager.active {
+		if _, ok := present[ip]; !ok {
+			delete(manager.active, ip)
+		}
+	}
+	manager.shrinkActiveIfNeeded()
+	return result, nil
+}
+
+func (manager *Manager) ReconcileFirewall(ctx context.Context) error {
+	_, err := manager.Reconcile(ctx, time.Now())
+	return err
 }
 
 // Process applies the policy to a detection and performs/persists an eligible block.

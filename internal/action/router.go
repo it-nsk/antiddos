@@ -45,3 +45,27 @@ func (router Router) Remove(ctx context.Context, ip netip.Addr) Result {
 	}
 	return Result{Status: StatusAlreadyAbsent, IP: ip, Reason: "address is absent from all configured firewall backends"}
 }
+
+func (router Router) ReadManagedBlocks(ctx context.Context) ([]ManagedBlock, error) {
+	seen := map[netip.Addr]ManagedBlock{}
+	for _, backend := range router.All {
+		reader, ok := backend.(ManagedBlockReader)
+		if !ok {
+			continue
+		}
+		blocks, err := reader.ReadManagedBlocks(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, block := range blocks {
+			if old, ok := seen[block.IP]; !ok || block.ExpiresAt.After(old.ExpiresAt) {
+				seen[block.IP] = block
+			}
+		}
+	}
+	result := make([]ManagedBlock, 0, len(seen))
+	for _, block := range seen {
+		result = append(result, block)
+	}
+	return result, nil
+}

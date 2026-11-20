@@ -836,7 +836,13 @@ The daemon runs as the `antiddos` system user. Its main paths are:
 | Web users and sessions | `/var/lib/antiddos-web/users.sqlite` |
 | Optional web unit | `antiddos-web.service` |
 
-SQLite contains `traffic_samples`, `detections`, and `active_blocks`. Traffic is aggregated into 15-second buckets and flushed every 15 seconds. Detection rows are written when thresholds are reached. Active block records contain the IP and expiry; unexpired blocks are restored after daemon restart with only their remaining duration. Expired block history is removed from `active_blocks`.
+SQLite contains `traffic_samples`, `detections`, and `active_blocks`. Traffic is aggregated into 15-second buckets and flushed every 15 seconds. Detection rows are written when thresholds are reached. For firewall modes, the managed AntiDDoS set/ipset is reconciled with SQLite at startup and in the background once a minute; firewall state is authoritative. No additional configuration or manual action is needed. `sudo antiddos blocks reconcile` (or the admin UI button) requests an immediate sync.
+
+To run the isolated real-firewall verification locally:
+
+```sh
+sudo bash tests/integration/firewall-reconcile/run.sh --output "$(mktemp -d /tmp/antiddos-firewall-reconcile.XXXXXX)"
+```
 
 ## Development
 

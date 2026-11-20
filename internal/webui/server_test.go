@@ -23,8 +23,9 @@ import (
 )
 
 type testBackend struct {
-	config *configservice.Service
-	stats  *storage.Reader
+	config     *configservice.Service
+	stats      *storage.Reader
+	reconciles int
 }
 
 func configserviceStringSlice(values ...string) *[]string { return &values }
@@ -40,6 +41,22 @@ func (b *testBackend) SoftBlocks(ctx context.Context, limit int) ([]storage.Soft
 }
 func (b *testBackend) ChallengeMetrics(context.Context, time.Time, time.Time, int) ([]challengeadmin.Metric, error) {
 	return []challengeadmin.Metric{{Site: "main", Reason: "issued", Count: 3}}, nil
+}
+func (b *testBackend) ReconcileBlocks(context.Context) error { b.reconciles++; return nil }
+
+func TestReconcileBlocksIsAdminOnly(t *testing.T) {
+	s := fixtureServer(t)
+	viewer, viewerSession := loginAs(t, s, "viewer")
+	if w := request(s, "POST", "/api/blocks/reconcile", "", viewer, viewerSession.CSRF, s.origin.String()); w.Code != http.StatusForbidden {
+		t.Fatalf("viewer status=%d body=%s", w.Code, w.Body.String())
+	}
+	admin, adminSession := loginAs(t, s, "admin")
+	if w := request(s, "POST", "/api/blocks/reconcile", "", admin, adminSession.CSRF, s.origin.String()); w.Code != http.StatusOK {
+		t.Fatalf("admin status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := s.backend.(*testBackend).reconciles; got != 1 {
+		t.Fatalf("reconciles=%d", got)
+	}
 }
 
 func TestChallengeAPIRequiresSessionAndAllowsViewer(t *testing.T) {

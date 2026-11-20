@@ -21,6 +21,7 @@ const DefaultSocketPath = "/run/antiddos/control.sock"
 type Unblocker interface {
 	Unblock(context.Context, netip.Addr) action.Result
 }
+type Reconciler interface{ ReconcileFirewall(context.Context) error }
 
 type unblockRequest struct {
 	IP string `json:"ip"`
@@ -96,6 +97,20 @@ func handler(manager Unblocker) http.Handler {
 		}
 		_ = json.NewEncoder(writer).Encode(response)
 	})
+	if reconciler, ok := manager.(Reconciler); ok {
+		mux.HandleFunc("POST /v1/blocks/reconcile", func(w http.ResponseWriter, r *http.Request) {
+			if r.ContentLength > 0 {
+				http.Error(w, "request body must be empty", http.StatusBadRequest)
+				return
+			}
+			if err := reconciler.ReconcileFirewall(r.Context()); err != nil {
+				http.Error(w, "reconcile managed firewall blocks: "+err.Error(), http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("{\"status\":\"reconciled\"}\n"))
+		})
+	}
 	return mux
 }
 
@@ -175,4 +190,26 @@ func RequestUnblock(ctx context.Context, path string, ip netip.Addr) (action.Res
 		return action.Result{}, fmt.Errorf("daemon returned unexpected unblock status %q", result.Status)
 	}
 	return result, nil
+}
+
+func RequestReconcile(ctx context.Context, path string) error {
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "unix", path)
+	}}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://antiddos/v1/blocks/reconcile", nil)
+	if err != nil {
+		return err
+	}
+	response, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("contact antiddos daemon: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return fmt.Errorf("daemon rejected reconcile request: %s", string(data))
+	}
+	return nil
 }

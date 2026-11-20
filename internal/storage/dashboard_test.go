@@ -28,7 +28,7 @@ func TestDashboardRangeAggregationPagination(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_, err = store.db.Exec(`INSERT INTO active_blocks VALUES(?,?,?,?)`, "192.0.2.2", "home", time.Now().UnixMilli(), time.Now().Add(time.Minute).UnixMilli())
+	_, err = store.db.Exec(`INSERT INTO active_blocks(ip,rule_id,started_at_unix_ms,expires_at_unix_ms) VALUES(?,?,?,?)`, "192.0.2.2", "home", time.Now().UnixMilli(), time.Now().Add(time.Minute).UnixMilli())
 	if err != nil {
 		t.Fatal(err)
 	}

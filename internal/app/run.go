@@ -144,29 +144,15 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	if err := manager.Cleanup(ctx, time.Now()); err != nil {
-		return fmt.Errorf("prune expired block records: %w", err)
-	}
 	if config.UsesFirewall(cfg) {
-		if err := manager.Restore(ctx, func(ip netip.Addr, ruleID string) bool {
-			if ruleActions[ruleID] != config.RuleActionNFTables && ruleActions[ruleID] != config.RuleActionIPTables {
-				return true
-			}
-			source := ruleSource[ruleID]
-			if ruleEngine, ok := ruleEngines[source]; ok {
-				return ruleEngine.IsIgnoredForRule(ip, ruleID)
-			}
-			for _, ruleEngine := range ruleEngines {
-				if ruleEngine.IsIgnored(request.Event{IP: ip}) {
-					return true
-				}
-			}
-			return false
-		}, func(result action.Result) {
-			logBlockResult(logger, result, false)
-		}); err != nil {
-			return err
+		result, err := manager.Reconcile(ctx, time.Now())
+		if err != nil {
+			logger.Error("reconcile managed firewall blocks", "error", err)
+		} else {
+			logger.Info("reconciled managed firewall blocks", "imported", result.Imported, "removed", result.Removed, "active", result.Active)
 		}
+	} else if err := manager.Cleanup(ctx, time.Now()); err != nil {
+		return fmt.Errorf("prune expired block records: %w", err)
 	}
 	var softManager *softblock.Manager
 	var softFeedPath string
@@ -254,6 +240,7 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 			Stats:     webReader,
 			Challenge: &challengeadmin.Client{},
 			Status:    webcontrol.Status{ConfigRevision: webConfig.Revision, StartedAt: time.Now(), BlockMode: cfg.BlockMode},
+			Reconcile: manager.ReconcileFirewall,
 		}
 		localServers++
 		go func() {
@@ -331,7 +318,11 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 			case <-blockCleanupCtx.Done():
 				return
 			case now := <-ticker.C:
-				if err := manager.Cleanup(blockCleanupCtx, now); err != nil {
+				if config.UsesFirewall(cfg) {
+					if _, err := manager.Reconcile(blockCleanupCtx, now); err != nil {
+						logger.Error("reconcile managed firewall blocks", "error", err)
+					}
+				} else if err := manager.Cleanup(blockCleanupCtx, now); err != nil {
 					logger.Error("prune expired block records", "error", err)
 				}
 				if err := softManager.Cleanup(blockCleanupCtx, now); err != nil {

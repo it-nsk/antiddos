@@ -87,7 +87,7 @@ func TestSoftBlockMigrationPreservesLegacyActiveBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 1 || rows[0].IP.String() != "203.0.113.9" || rows[0].RuleID != "legacy" {
+	if len(rows) != 1 || rows[0].IP.String() != "203.0.113.9" || rows[0].RuleID != "legacy" || rows[0].Origin != "detected" {
 		t.Fatalf("legacy active_blocks changed: %+v", rows)
 	}
 	lease := SoftBlockLease{SiteID: "main", RuleID: "r", SourceID: "web", IP: netip.MustParseAddr("2001:db8::1"), CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute)}

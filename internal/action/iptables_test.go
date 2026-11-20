@@ -4,9 +4,31 @@ import (
 	"context"
 	"net/netip"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestIPTablesReadManagedBlocksNeverEnumeratesForeignIPSets(t *testing.T) {
+	var calls [][]string
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	backend := IPTables{IPSetBinary: "ipset-test", now: func() time.Time { return now }, run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		calls = append(calls, args)
+		if args[1] == IPSetIPv4 {
+			return []byte("Warning: 127.0.0.2 is in set antiddos_blocked_ipv4.\ncreate antiddos_blocked_ipv4 hash:ip family inet timeout 3600\nadd antiddos_blocked_ipv4 192.0.2.1 timeout 30\n"), nil
+		}
+		return []byte("create antiddos_blocked_ipv6 hash:ip family inet6 timeout 3600\nadd antiddos_blocked_ipv6 2001:db8::1 timeout 30\n"), nil
+	}}
+	blocks, err := backend.ReadManagedBlocks(context.Background())
+	if err != nil || len(blocks) != 2 {
+		t.Fatalf("blocks=%+v err=%v", blocks, err)
+	}
+	for _, call := range calls {
+		if len(call) != 2 || call[0] != "save" || !strings.HasPrefix(call[1], "antiddos_blocked_") {
+			t.Fatalf("foreign/unexpected ipset read: %q", call)
+		}
+	}
+}
 
 func TestIPTablesAddsAddressToFamilySetWithRemainingTimeout(t *testing.T) {
 	now := time.Date(2026, time.November, 9, 10, 0, 0, 0, time.UTC)

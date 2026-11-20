@@ -150,7 +150,8 @@ func (store *Store) createSchema(ctx context.Context) error {
 			ip TEXT PRIMARY KEY,
 			rule_id TEXT NOT NULL,
 			started_at_unix_ms INTEGER NOT NULL,
-			expires_at_unix_ms INTEGER NOT NULL CHECK (expires_at_unix_ms > started_at_unix_ms)
+			expires_at_unix_ms INTEGER NOT NULL CHECK (expires_at_unix_ms > started_at_unix_ms),
+			origin TEXT NOT NULL DEFAULT 'detected' CHECK (origin IN ('detected','external'))
 		)`,
 		`CREATE TABLE IF NOT EXISTS soft_block_decisions (
 			site_id TEXT NOT NULL,
@@ -237,6 +238,9 @@ func (store *Store) createSchema(ctx context.Context) error {
 		}
 	}
 	if err := store.addColumnIfMissing(ctx, "detections", "log_source", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := store.addColumnIfMissing(ctx, "active_blocks", "origin", `TEXT NOT NULL DEFAULT 'detected'`); err != nil {
 		return err
 	}
 	for _, column := range []struct{ name, definition string }{
@@ -569,17 +573,105 @@ func (store *Store) RecordBlock(ctx context.Context, ip netip.Addr, ruleID strin
 		return fmt.Errorf("invalid block record")
 	}
 	_, err := store.db.ExecContext(ctx, `INSERT INTO active_blocks (
-		ip, rule_id, started_at_unix_ms, expires_at_unix_ms
-	) VALUES (?, ?, ?, ?)
+		ip, rule_id, started_at_unix_ms, expires_at_unix_ms, origin
+	) VALUES (?, ?, ?, ?, 'detected')
 	ON CONFLICT(ip) DO UPDATE SET
 		rule_id = excluded.rule_id,
 		started_at_unix_ms = excluded.started_at_unix_ms,
-		expires_at_unix_ms = excluded.expires_at_unix_ms`,
+		expires_at_unix_ms = excluded.expires_at_unix_ms,
+		origin = excluded.origin`,
 		ip.Unmap().String(), ruleID, startedAt.UnixMilli(), expiresAt.UnixMilli())
 	if err != nil {
 		return fmt.Errorf("record active block for %s: %w", ip, err)
 	}
 	return nil
+}
+
+// FirewallBlock is an unexpired lease observed in one of AntiDDoS's managed
+// firewall sets. It intentionally carries no rule ID because the firewall
+// cannot reliably provide one.
+type FirewallBlock struct {
+	IP        netip.Addr
+	ExpiresAt time.Time
+}
+
+// ReconcileFirewallBlocks makes the supplied managed-firewall snapshot match
+// active_blocks in one transaction. Callers must finish reading the firewall
+// before calling this method so a read error cannot change SQLite.
+func (store *Store) ReconcileFirewallBlocks(ctx context.Context, now time.Time, firewall []FirewallBlock) (imported, removed int, err error) {
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("begin firewall reconciliation: %w", err)
+	}
+	defer tx.Rollback()
+	// Expiry is meaningful only after the firewall snapshot was read
+	// successfully. This keeps the no-delete-on-read-error guarantee while
+	// ensuring an explicit reconcile also removes stale SQLite leases.
+	if _, err = tx.ExecContext(ctx, `DELETE FROM active_blocks WHERE expires_at_unix_ms <= ?`, now.UnixMilli()); err != nil {
+		return 0, 0, fmt.Errorf("prune expired blocks for reconciliation: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT ip, rule_id, started_at_unix_ms, expires_at_unix_ms, origin FROM active_blocks WHERE expires_at_unix_ms > ?`, now.UnixMilli())
+	if err != nil {
+		return 0, 0, fmt.Errorf("read active blocks for reconciliation: %w", err)
+	}
+	stored := map[netip.Addr]BlockRow{}
+	for rows.Next() {
+		var row BlockRow
+		var value string
+		var started, expires int64
+		if err := rows.Scan(&value, &row.RuleID, &started, &expires, &row.Origin); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		ip, parseErr := netip.ParseAddr(value)
+		if parseErr != nil {
+			rows.Close()
+			return 0, 0, fmt.Errorf("read invalid stored block IP %q: %w", value, parseErr)
+		}
+		row.IP = ip.Unmap()
+		row.StartedAt = time.UnixMilli(started)
+		row.ExpiresAt = time.UnixMilli(expires)
+		stored[row.IP] = row
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, 0, err
+	}
+	rows.Close()
+	present := map[netip.Addr]FirewallBlock{}
+	for _, block := range firewall {
+		if block.IP.IsValid() && block.ExpiresAt.After(now) {
+			present[block.IP.Unmap()] = block
+		}
+	}
+	for ip, block := range present {
+		_, exists := stored[ip]
+		if !exists {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO active_blocks(ip,rule_id,started_at_unix_ms,expires_at_unix_ms,origin) VALUES(?, 'external-firewall', ?, ?, 'external')
+				ON CONFLICT(ip) DO UPDATE SET rule_id=excluded.rule_id, started_at_unix_ms=excluded.started_at_unix_ms, expires_at_unix_ms=excluded.expires_at_unix_ms, origin=excluded.origin`, ip.String(), now.UnixMilli(), block.ExpiresAt.UnixMilli()); err != nil {
+				return 0, 0, fmt.Errorf("import firewall block %s: %w", ip, err)
+			}
+			imported++
+			continue
+		}
+		// Rule and origin remain the SQLite metadata for an existing lease.
+		_, err = tx.ExecContext(ctx, `UPDATE active_blocks SET expires_at_unix_ms=? WHERE ip=?`, block.ExpiresAt.UnixMilli(), ip.String())
+		if err != nil {
+			return 0, 0, fmt.Errorf("update firewall block %s: %w", ip, err)
+		}
+	}
+	for ip := range stored {
+		if _, ok := present[ip]; !ok {
+			if _, err = tx.ExecContext(ctx, `DELETE FROM active_blocks WHERE ip=?`, ip.String()); err != nil {
+				return 0, 0, fmt.Errorf("remove absent firewall block %s: %w", ip, err)
+			}
+			removed++
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("commit firewall reconciliation: %w", err)
+	}
+	return imported, removed, nil
 }
 
 func (store *Store) PruneExpiredBlocks(ctx context.Context, now time.Time) error {

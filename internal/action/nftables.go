@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"os/exec"
@@ -31,6 +32,143 @@ type NFTables struct {
 	BlockTCPPorts []uint16
 	run           func(context.Context, string, ...string) ([]byte, error)
 	now           func() time.Time
+}
+
+// ReadManagedBlocks reads only the two sets in the already namespaced,
+// AntiDDoS-owned table. JSON avoids parsing nft's presentation format.
+func (nftAction *NFTables) ReadManagedBlocks(ctx context.Context) ([]ManagedBlock, error) {
+	if nftAction == nil {
+		return nil, fmt.Errorf("nftables action is not configured")
+	}
+	binary := nftAction.Binary
+	if binary == "" {
+		binary = "nft"
+	}
+	run := nftAction.run
+	if run == nil {
+		run = runNFTCommand
+	}
+	table, err := run(ctx, binary, "-j", "list", "table", NftFamily, NftTable)
+	if err != nil {
+		return nil, fmt.Errorf("inspect managed nftables table: %w: %s", err, strings.TrimSpace(string(table)))
+	}
+	if !nftTableIsOwned(table) {
+		return nil, fmt.Errorf("nftables table %s %s is not marked as AntiDDoS-owned", NftFamily, NftTable)
+	}
+	now := time.Now()
+	if nftAction.now != nil {
+		now = nftAction.now()
+	}
+	var result []ManagedBlock
+	for _, set := range []string{NftIPv4Set, NftIPv6Set} {
+		output, err := run(ctx, binary, "-j", "list", "set", NftFamily, NftTable, set)
+		if err != nil {
+			return nil, fmt.Errorf("read managed nftables set %s: %w: %s", set, err, strings.TrimSpace(string(output)))
+		}
+		blocks, err := parseNFTSetJSON(output, now)
+		if err != nil {
+			return nil, fmt.Errorf("parse managed nftables set %s: %w", set, err)
+		}
+		result = append(result, blocks...)
+	}
+	return result, nil
+}
+
+// nftTableIsOwned accepts only a comment attached to the requested table
+// object. A substring search is insufficient: an unrelated child object can
+// itself contain the ownership text.
+func nftTableIsOwned(data []byte) bool {
+	var document struct {
+		NFTables []struct {
+			Table *struct {
+				Family  string `json:"family"`
+				Name    string `json:"name"`
+				Comment string `json:"comment"`
+			} `json:"table"`
+		} `json:"nftables"`
+	}
+	if json.Unmarshal(data, &document) != nil {
+		return false
+	}
+	for _, item := range document.NFTables {
+		if item.Table != nil && item.Table.Family == NftFamily && item.Table.Name == NftTable && item.Table.Comment == nftTableComment {
+			return true
+		}
+	}
+	return false
+}
+
+func parseNFTSetJSON(data []byte, now time.Time) ([]ManagedBlock, error) {
+	var document struct {
+		NFTables []struct {
+			Set *struct {
+				Elem json.RawMessage `json:"elem"`
+			} `json:"set"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil {
+		return nil, err
+	}
+	var result []ManagedBlock
+	for _, item := range document.NFTables {
+		if item.Set == nil {
+			continue
+		}
+		// nft omits elem entirely for an empty set.
+		if len(item.Set.Elem) == 0 || string(item.Set.Elem) == "null" {
+			continue
+		}
+		var elements []json.RawMessage
+		if err := json.Unmarshal(item.Set.Elem, &elements); err != nil {
+			return nil, err
+		}
+		for _, raw := range elements {
+			// nft JSON wraps ordinary set entries in {"elem": {...}}.
+			var wrapper struct {
+				Elem json.RawMessage `json:"elem"`
+			}
+			if json.Unmarshal(raw, &wrapper) == nil && len(wrapper.Elem) != 0 {
+				raw = wrapper.Elem
+			}
+			var element struct {
+				Val     string          `json:"val"`
+				Timeout json.RawMessage `json:"timeout"`
+				Expires json.RawMessage `json:"expires"`
+			}
+			if err := json.Unmarshal(raw, &element); err != nil {
+				return nil, err
+			}
+			ip, err := netip.ParseAddr(element.Val)
+			if err != nil {
+				return nil, fmt.Errorf("invalid set address %q", element.Val)
+			}
+			remaining, ok := nftJSONDuration(element.Expires)
+			if !ok {
+				remaining, ok = nftJSONDuration(element.Timeout)
+			}
+			if !ok || remaining <= 0 {
+				return nil, fmt.Errorf("element %s has no usable timeout", ip)
+			}
+			result = append(result, ManagedBlock{IP: ip.Unmap(), ExpiresAt: now.Add(remaining)})
+		}
+	}
+	return result, nil
+}
+func nftJSONDuration(raw json.RawMessage) (time.Duration, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, false
+	}
+	var seconds float64
+	if json.Unmarshal(raw, &seconds) == nil {
+		// nft JSON expresses timeout and expires in seconds.
+		return time.Duration(seconds * float64(time.Second)), true
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		d, e := time.ParseDuration(text)
+		return d, e == nil
+	}
+	return 0, false
 }
 
 func (nftAction *NFTables) Apply(ctx context.Context, request BlockRequest) Result {

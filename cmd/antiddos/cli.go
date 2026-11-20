@@ -43,6 +43,7 @@ const usage = `Usage:
   antiddos soft-block COMMAND manage soft-block prerequisites and rollback config
   antiddos user COMMAND        manage web users (add/list/password/delete)
   antiddos unblock IP          remove one IP from the firewall block set
+  antiddos blocks reconcile    reconcile SQLite from managed firewall sets
 
 The systemd service reads /etc/antiddos/config.json. Values from
 /etc/default/antiddos can override its paths:
@@ -86,12 +87,25 @@ func executeCommand(ctx context.Context, args []string, logger *slog.Logger, out
 		err = userCommand(ctx, args[1:], out)
 	case "unblock":
 		err = unblock(ctx, args[1:], out)
+	case "blocks":
+		err = blocks(ctx, args[1:], out)
 	default:
 		err = fmt.Errorf("unknown command %q; use antiddos --help", args[0])
 	}
 	if errors.Is(err, flag.ErrHelp) {
 		return nil
 	}
+	return err
+}
+
+func blocks(ctx context.Context, args []string, out io.Writer) error {
+	if len(args) != 1 || args[0] != "reconcile" {
+		return fmt.Errorf("usage: antiddos blocks reconcile")
+	}
+	if err := control.RequestReconcile(ctx, control.DefaultSocketPath); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintln(out, "managed firewall blocks reconciled")
 	return err
 }
 
@@ -133,6 +147,21 @@ func launch(ctx context.Context, args []string, logger *slog.Logger) error {
 		childArgs = append(childArgs, "--web-socket", webcontrol.DefaultSocketPath)
 		return syscall.Exec(setpriv, childArgs, os.Environ())
 	}
+	// Initialization needs CAP_NET_ADMIN and must happen in this launcher
+	// process. The nftables-only path below deliberately drops CAP_NET_RAW
+	// before exec'ing `run`, so doing this afterwards would skip setup entirely.
+	if config.UsesNFTables(cfg) {
+		nftables := &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}
+		if err := nftables.Initialize(ctx); err != nil {
+			return fmt.Errorf("initialize nftables blocking: %w", err)
+		}
+	}
+	if config.UsesIPTables(cfg) {
+		iptables := &action.IPTables{BlockTCPPorts: cfg.BlockTCPPorts}
+		if err := iptables.Initialize(ctx); err != nil {
+			return fmt.Errorf("initialize iptables/ipset blocking: %w", err)
+		}
+	}
 	if config.UsesNFTables(cfg) && !config.UsesIPTables(cfg) {
 		setpriv, err := exec.LookPath("setpriv")
 		if err != nil {
@@ -148,18 +177,6 @@ func launch(ctx context.Context, args []string, logger *slog.Logger) error {
 		childArgs = append(childArgs, "--control-socket", control.DefaultSocketPath)
 		childArgs = append(childArgs, "--web-socket", webcontrol.DefaultSocketPath)
 		return syscall.Exec(setpriv, childArgs, os.Environ())
-	}
-	if config.UsesNFTables(cfg) {
-		nftables := &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}
-		if err := nftables.Initialize(ctx); err != nil {
-			return fmt.Errorf("initialize nftables blocking: %w", err)
-		}
-	}
-	if config.UsesIPTables(cfg) {
-		iptables := &action.IPTables{BlockTCPPorts: cfg.BlockTCPPorts}
-		if err := iptables.Initialize(ctx); err != nil {
-			return fmt.Errorf("initialize iptables/ipset blocking: %w", err)
-		}
 	}
 	return app.Run(ctx, app.RunOptions{
 		Config: options.Config, LogFile: options.LogFile,

@@ -48,6 +48,7 @@ type DashboardBlock struct {
 	Rule      string `json:"rule"`
 	StartedAt int64  `json:"started_at"`
 	ExpiresAt int64  `json:"expires_at"`
+	Origin    string `json:"origin"`
 }
 type Dashboard struct {
 	From           int64                `json:"from"`
@@ -242,7 +243,7 @@ func (r *Reader) Dashboard(ctx context.Context, from, to time.Time, before int64
 		return d, err
 	}
 	for _, b := range blocks {
-		d.Blocks = append(d.Blocks, DashboardBlock{b.IP.String(), b.RuleID, b.StartedAt.Unix(), b.ExpiresAt.Unix()})
+		d.Blocks = append(d.Blocks, DashboardBlock{b.IP.String(), b.RuleID, b.StartedAt.Unix(), b.ExpiresAt.Unix(), b.Origin})
 	}
 	return d, tx.Commit()
 }
