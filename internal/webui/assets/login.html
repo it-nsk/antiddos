@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- ui:theme -->
+  <link rel="icon" type="image/svg+xml" sizes="any" href="assets/logos/lb-shield.svg">
+  <meta name="color-scheme" content="light dark">
+  <script src="assets/theme.js"></script>
+  <link rel="stylesheet" href="assets/button-hints.css">
+  <script defer src="assets/api.js"></script>
+  <script defer src="assets/button-hints.js"></script>
+<!-- /ui:theme -->
+  <title>Вход · LogBan</title>
+  <link rel="stylesheet" href="assets/fonts/bootstrap-icons.min.css">
+  <link rel="stylesheet" href="assets/adminlte.min.css">
+  <link rel="stylesheet" href="assets/panel-theme.css">
+  <script defer src="assets/auth.js"></script>
+</head>
+<body class="login-page bg-body-secondary" data-page="login">
+<!-- ui:login -->
+    <main class="login-box">
+      <h1 class="login-logo">
+        <a href="index.html"><b>Log</b>Ban</a>
+      </h1>
+      <!-- /.login-logo -->
+      <div class="card">
+        <div class="card-body login-card-body">
+          <p class="login-box-msg">Войдите, чтобы начать сеанс</p>
+
+          <form id="login-form" method="post">
+            <label class="visually-hidden" for="loginEmail">Пользователь</label>
+            <div class="input-group mb-3">
+              <input id="loginEmail" type="text" class="form-control" placeholder="Пользователь" name="username"  autocomplete="username" required />
+              <div class="input-group-text">
+                <span class="bi bi-envelope"></span>
+              </div>
+            </div>
+            <label class="visually-hidden" for="loginPassword">Пароль</label>
+            <div class="input-group mb-3">
+              <input
+                id="loginPassword"
+                type="password"
+                class="form-control"
+                placeholder="Пароль" autocomplete="current-password" required
+              />
+              <div class="input-group-text">
+                <span class="bi bi-lock-fill"></span>
+              </div>
+            </div>
+            <!--begin::Row-->
+            <div class="row">
+              <div class="col-8">
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" value="" id="flexCheckDefault" />
+                  <label class="form-check-label" for="flexCheckDefault"> Запомнить меня </label>
+                </div>
+              </div>
+              <!-- /.col -->
+              <div class="col-4">
+                <div class="d-grid gap-2">
+                  <button type="submit" class="btn btn-primary">Войти</button>
+                </div>
+              </div>
+              <!-- /.col -->
+            </div>
+            <!--end::Row-->
+          </form>
+
+        </div>
+        <!-- /.login-card-body -->
+      </div>
+    </main>
+<!-- /ui:login -->
+</body>
+</html>

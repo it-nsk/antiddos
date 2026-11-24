@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit && vite build",
-    "dev": "vite --host 127.0.0.1",
+    "build": "node build-logban.mjs",
+    "dev": "npm run build && node tests/serve.mjs",
     "test:e2e": "npm run build && NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost playwright test"
   },
   "dependencies": {

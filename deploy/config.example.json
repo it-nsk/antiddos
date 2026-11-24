@@ -2,7 +2,7 @@
   "log_file": "/var/log/nginx/access.log",
   "database_path": "/var/lib/antiddos/antiddos.sqlite",
   "start_position": "end",
-  "block_mode": "dry_run",
+  "block_mode": "hybrid",
   "block_duration": "5m",
   "block_tcp_ports": [80, 443],
   "engine": {
@@ -10,6 +10,7 @@
     "rules": [
       {
         "id": "homepage",
+        "action": "dry_run",
         "path_regex": "^/$",
         "window": "5s",
         "threshold": 5,

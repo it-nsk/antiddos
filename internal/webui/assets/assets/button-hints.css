@@ -1,0 +1,16 @@
+button:disabled:disabled {
+  pointer-events: auto;
+}
+#button-hint {
+  position: fixed;
+  z-index: 1090;
+  pointer-events: none;
+  max-width: min(22rem, calc(100vw - 1rem));
+  padding: .35rem .65rem;
+  border-radius: .375rem;
+  background: var(--bs-emphasis-color, #212529);
+  color: var(--bs-body-bg, white);
+  font-size: .875rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}

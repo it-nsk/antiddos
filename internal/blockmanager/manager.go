@@ -21,15 +21,40 @@ const minimumActiveMapShrinkSize = 4096
 // Manager is the sole owner of active block state. Calls are serialized because
 // detections, expiry cleanup, and local unblock requests can arrive concurrently.
 type Manager struct {
-	mu          sync.Mutex
-	policy      *blockpolicy.Policy
-	duration    time.Duration
-	action      action.Action
-	store       *storage.Store
-	active      map[netip.Addr]blockpolicy.ActiveBlock
-	activePeak  int
-	mapRebuilds int
-	whitelist   func(netip.Addr, string) bool
+	mu             sync.Mutex
+	policy         *blockpolicy.Policy
+	duration       time.Duration
+	action         action.Action
+	store          *storage.Store
+	active         map[netip.Addr]blockpolicy.ActiveBlock
+	activePeak     int
+	mapRebuilds    int
+	whitelist      func(netip.Addr, string) bool
+	ruleDurations  map[string]time.Duration
+	permanentRules map[string]bool
+	repeatRules    map[string]RepeatRule
+}
+
+type RepeatRule struct {
+	Multiplier int
+	Maximum    time.Duration
+}
+
+// SetRuleDurations installs per-rule lease overrides from the validated
+// configuration. A permanent rule is represented by the latest timestamp the
+// storage and firewall APIs can safely carry; it remains removable through the
+// normal unblock path.
+func (manager *Manager) SetRuleDurations(durations map[string]time.Duration, permanent map[string]bool) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.ruleDurations = maps.Clone(durations)
+	manager.permanentRules = maps.Clone(permanent)
+}
+
+func (manager *Manager) SetRepeatRules(rules map[string]RepeatRule) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.repeatRules = maps.Clone(rules)
 }
 
 type ReconcileResult struct{ Imported, Removed, Active int }
@@ -302,14 +327,42 @@ func (manager *Manager) Process(ctx context.Context, detection engine.Detection,
 	if decision.Outcome == blockpolicy.OutcomeKeepExistingBlock {
 		return action.Result{Status: action.StatusAlreadyActive, IP: decision.IP, ExpiresAt: decision.ExpiresAt, Reason: string(decision.Reason)}, nil
 	}
+	if manager.permanentRules[detection.RuleID] {
+		decision.ExpiresAt = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+	} else if duration, ok := manager.ruleDurations[detection.RuleID]; ok {
+		decision.ExpiresAt = now.Add(duration)
+	}
+	strike := 0
+	if repeat, ok := manager.repeatRules[detection.RuleID]; ok && repeat.Multiplier > 1 && repeat.Maximum > 0 {
+		level, err := manager.store.BlockStrike(ctx, detection.RuleID, decision.IP, now, 7*24*time.Hour)
+		if err != nil {
+			return action.Result{Status: action.StatusFailed, IP: decision.IP, Err: err}, err
+		}
+		base := decision.ExpiresAt.Sub(now)
+		for n := 1; n < level && base < repeat.Maximum; n++ {
+			// Do not multiply first: a large valid Go duration can overflow
+			// before it is capped, turning a block into a negative lease.
+			if base > repeat.Maximum/time.Duration(repeat.Multiplier) {
+				base = repeat.Maximum
+				break
+			}
+			base *= time.Duration(repeat.Multiplier)
+		}
+		decision.ExpiresAt = now.Add(base)
+		strike = level
+	}
 	result := manager.action.Apply(ctx, action.BlockRequest{IP: decision.IP, ExpiresAt: decision.ExpiresAt, RuleID: decision.RuleID})
 	if result.Status == action.StatusWouldApply || result.Status == action.StatusApplied {
 		manager.rememberActive(blockpolicy.ActiveBlock{IP: decision.IP, ExpiresAt: decision.ExpiresAt})
 	}
 	if result.Status == action.StatusApplied {
-		startedAt := decision.ExpiresAt.Add(-manager.duration)
-		if err := manager.store.RecordBlock(ctx, decision.IP, decision.RuleID, startedAt, decision.ExpiresAt); err != nil {
+		if err := manager.store.RecordBlock(ctx, decision.IP, decision.RuleID, now, decision.ExpiresAt); err != nil {
 			return result, fmt.Errorf("persist active block: %w", err)
+		}
+		if strike > 0 {
+			if err := manager.store.RecordBlockStrike(ctx, decision.RuleID, decision.IP, strike, now); err != nil {
+				return result, err
+			}
 		}
 	}
 	return result, nil

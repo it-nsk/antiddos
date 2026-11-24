@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="512" height="512">
+  <title>LogBan — монограмма LB в щите</title>
+  <style>
+    svg { color: #192d42; }
+    @media (prefers-color-scheme: dark) { svg { color: #e1ecf6; } }
+  </style>
+  <g fill="currentColor" fill-rule="evenodd">
+    <path d="M64 4 Q89 7 116 19 L112 57 Q109 91 64 124 Q19 91 16 57 L12 19 Q39 7 64 4 Z
+             M64 12 Q42 15 21 24 L24 56 Q27 85 64 114 Q101 85 104 56 L107 24 Q86 15 64 12 Z"/>
+    <path d="M30 30 L42 26 L45 68 Q50 76 57 82 L58 99 Q43 87 34 71 Z"/>
+    <path d="M57 22 Q72 22 85 25 Q100 28 98 41 Q97 50 88 58 Q96 59 92 70 Q86 84 64 103 Z
+             M69 33 L70 53 Q83 48 86 41 Q89 35 69 33 Z
+             M71 64 L72 82 Q82 73 83 66 Q84 60 71 64 Z"/>
+  </g>
+</svg>

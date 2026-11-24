@@ -113,7 +113,7 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 		return fmt.Errorf("initialize block policy: %w", err)
 	}
 	var blockAction action.Action = action.DryRun{}
-	if config.UsesFirewall(cfg) {
+	if config.UsesFirewall(cfg) || hasCustomActions(cfg) {
 		backends := make(map[string]action.Action, 2)
 		all := make([]action.Action, 0, 2)
 		if config.UsesNFTables(cfg) {
@@ -127,6 +127,14 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 		byRule := make(map[string]action.Action, len(ruleActions))
 		for ruleID, actionName := range ruleActions {
 			byRule[ruleID] = backends[actionName]
+			if actionName == config.RuleActionCustom {
+				for _, rule := range cfg.Engine.Rules {
+					if rule.ID == ruleID {
+						byRule[ruleID] = action.Custom{Command: rule.Command}
+						break
+					}
+				}
+			}
 		}
 		blockAction = action.Router{ByRule: byRule, All: all}
 	}
@@ -144,6 +152,22 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	ruleBlockDurations := make(map[string]time.Duration)
+	permanentRuleBlocks := make(map[string]bool)
+	repeatRuleBlocks := make(map[string]blockmanager.RepeatRule)
+	for _, rule := range cfg.Engine.Rules {
+		if rule.BlockDuration != 0 {
+			ruleBlockDurations[rule.ID] = rule.BlockDuration
+		}
+		if rule.BlockPermanent {
+			permanentRuleBlocks[rule.ID] = true
+		}
+		if rule.RepeatBlockMultiplier > 1 && rule.RepeatBlockMaxDuration > 0 {
+			repeatRuleBlocks[rule.ID] = blockmanager.RepeatRule{Multiplier: rule.RepeatBlockMultiplier, Maximum: rule.RepeatBlockMaxDuration}
+		}
+	}
+	manager.SetRuleDurations(ruleBlockDurations, permanentRuleBlocks)
+	manager.SetRepeatRules(repeatRuleBlocks)
 	isFirewallWhitelisted := func(ip netip.Addr, ruleID string) bool {
 		if ruleActions[ruleID] != config.RuleActionNFTables && ruleActions[ruleID] != config.RuleActionIPTables {
 			for _, ruleEngine := range ruleEngines {
@@ -441,7 +465,7 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 				if err != nil {
 					logger.Error("persist soft-block decision", "rule", detection.RuleID, "error", err)
 				}
-			} else if actionName == config.RuleActionNFTables || actionName == config.RuleActionIPTables || cfg.BlockMode == config.BlockModeDryRun {
+			} else if actionName == config.RuleActionNFTables || actionName == config.RuleActionIPTables || actionName == config.RuleActionCustom || cfg.BlockMode == config.BlockModeDryRun {
 				result, err := manager.Process(ctx, *evaluation.Detection, time.Now())
 				logBlockResult(logger, result, cfg.BlockMode == config.BlockModeDryRun)
 				if err != nil {
@@ -653,4 +677,13 @@ func logDetection(logger *slog.Logger, analysisConfigID string, detection engine
 		"threshold", detection.Threshold,
 		"dry_run", detection.DryRun,
 	)
+}
+
+func hasCustomActions(cfg config.Config) bool {
+	for _, rule := range cfg.Engine.Rules {
+		if config.EffectiveRuleAction(cfg.BlockMode, rule) == config.RuleActionCustom {
+			return true
+		}
+	}
+	return false
 }

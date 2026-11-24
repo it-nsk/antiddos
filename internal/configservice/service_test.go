@@ -197,10 +197,10 @@ func TestSoftBlockFieldsSurviveGUIStyleSave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.BlockMode != config.BlockModeSoftBlock || cfg.SoftBlock.CookieTTL != 45*time.Minute || len(cfg.SoftBlock.Sites) != 1 || cfg.SoftBlock.Sites[0].Hosts[0] != "example.test" {
+	if cfg.BlockMode != config.BlockModeHybrid || cfg.SoftBlock.CookieTTL != 45*time.Minute || len(cfg.SoftBlock.Sites) != 1 || cfg.SoftBlock.Sites[0].Hosts[0] != "example.test" {
 		t.Fatalf("soft config lost during save: %#v", cfg.SoftBlock)
 	}
-	if updated.BlockMode != config.BlockModeSoftBlock {
+	if updated.BlockMode != config.BlockModeHybrid {
 		t.Fatalf("saved mode = %q", updated.BlockMode)
 	}
 	bad := "999h"
@@ -234,31 +234,45 @@ func TestHybridRuleActionRoundTripAndNFTConfirmation(t *testing.T) {
 		t.Fatalf("saved actions = %+v", next.Rules)
 	}
 }
-func TestBlockModeChangeRequiresExplicitConfirmation(t *testing.T) {
+func TestLegacyModeMigratesToPerRuleActions(t *testing.T) {
 	s := testService(t)
 	doc, err := s.Read()
 	if err != nil {
 		t.Fatal(err)
 	}
-	mode := config.BlockModeNFTables
-	if _, err := s.Save(Update{Revision: doc.Revision, BlockMode: &mode}); err == nil {
-		t.Fatal("real blocking enabled without explicit confirmation")
-	}
-	unchanged, err := s.Read()
-	if err != nil || unchanged.BlockMode != config.BlockModeDryRun || unchanged.Revision != doc.Revision {
-		t.Fatalf("unconfirmed change modified config: %#v, %v", unchanged, err)
-	}
-	if _, err := s.Save(Update{Revision: doc.Revision, BlockMode: &mode, ConfirmRealBlocks: true}); err != nil {
+	updated, err := s.Save(Update{Revision: doc.Revision, Rules: map[string]RuleUpdate{"home": {Action: action(config.RuleActionNFTables)}}, ConfirmRealBlocks: true})
+	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := s.Read()
-	if err != nil || updated.BlockMode != config.BlockModeNFTables {
-		t.Fatalf("confirmed mode = %q, %v", updated.BlockMode, err)
+	if updated.BlockMode != config.BlockModeHybrid || updated.Rules[0].Action != config.RuleActionNFTables {
+		t.Fatalf("migrated config = %#v", updated)
 	}
-	doc = updated
+	mode := config.BlockModeNFTables
 	mode = "invalid"
-	if _, err := s.Save(Update{Revision: doc.Revision, BlockMode: &mode}); err == nil {
-		t.Fatal("invalid block mode accepted")
+	if _, err := s.Save(Update{Revision: updated.Revision, BlockMode: &mode}); err == nil {
+		t.Fatal("global mode update accepted")
+	}
+}
+
+func TestProgressiveFirewallRuleRoundTrip(t *testing.T) {
+	s := testService(t)
+	doc, err := s.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	multiplier, maximum := 2, "10m"
+	next, err := s.Save(Update{Revision: doc.Revision, ConfirmRealBlocks: true, Rules: map[string]RuleUpdate{"home": {
+		Action: action(config.RuleActionNFTables), RepeatBlockMultiplier: &multiplier, RepeatBlockMaxDuration: &maximum,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.BlockMode != config.BlockModeHybrid || next.Rules[0].RepeatBlockMultiplier != 2 || next.Rules[0].RepeatBlockMaxDuration != "10m0s" {
+		t.Fatalf("saved progressive rule = %+v", next.Rules[0])
+	}
+	bad := 17
+	if _, err := s.Save(Update{Revision: next.Revision, Rules: map[string]RuleUpdate{"home": {RepeatBlockMultiplier: &bad}}}); err == nil {
+		t.Fatal("accepted invalid multiplier")
 	}
 }
 func TestInvalidEditsNeverChangeFile(t *testing.T) {

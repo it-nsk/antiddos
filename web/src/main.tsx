@@ -786,52 +786,6 @@ function Workspace({
                 <SoftBlockPanel rows={softBlocks} />
               </>
             )}
-            <section className="panel response-time-summary">
-              <strong>Время ответа</strong>{' '}
-              <span>
-                {responseRows ? `min ${Math.min(...measuredResponsePoints.map((p) => p.response_time_min_ms))} мс · avg ${Math.round(responseTotalMS / responseRows)} мс · max ${Math.max(...measuredResponsePoints.map((p) => p.response_time_max_ms))} мс` : 'Нет данных о времени ответа за выбранный период'}
-              </span>
-            </section>
-            <div className="cards">
-              {[
-                [
-                  "Всего запросов",
-                  fmt.format(totals.requests),
-                  "Все источники, включая whitelist",
-                ],
-                [
-                  "Подходят правилам",
-                  fmt.format(totals.matched),
-                  "До исключения по whitelist",
-                ],
-                [
-                  "Зелёный трафик",
-                  fmt.format(Math.max(0, totals.requests - totals.matched)),
-                  "Запросы без совпадения с правилами",
-                ],
-                [
-                  "Красный трафик",
-                  fmt.format(totals.matched),
-                  "Запросы, совпавшие с правилами",
-                ],
-                [
-                  "Передано",
-                  fmt.format(totals.bytes / 1048576) + " MiB",
-                  "Байты ответа из access log",
-                ],
-                [
-                  "Срабатывания",
-                  fmt.format(data.detection_count),
-                  "Количество detections за период",
-                ],
-              ].map(([label, value, note]) => (
-                <section className="panel metric" key={label}>
-                  <span>{label}</span>
-                  <strong>{value}</strong>
-                  <small>{note}</small>
-                </section>
-              ))}
-            </div>
             <div className="charts">
               <Chart
                 title="Время ответа"

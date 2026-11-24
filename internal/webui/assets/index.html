@@ -1,3 +1,571 @@
-<!doctype html><html lang="ru"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><meta name="color-scheme" content="light"/><title>AntiDDoS · Мониторинг</title>  <script type="module" crossorigin src="/assets/index-CW1h6_DW.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-DSN2P0xD.css">
-</head><body><div id="root"></div></body></html>
+<!doctype html>
+<html lang="ru" data-lte-color-mode="off">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- ui:theme -->
+  <link rel="icon" type="image/svg+xml" sizes="any" href="assets/logos/lb-shield.svg">
+  <meta name="color-scheme" content="light dark">
+  <script src="assets/theme.js"></script>
+  <link rel="stylesheet" href="assets/button-hints.css">
+  <script defer src="assets/api.js"></script>
+  <script defer src="assets/button-hints.js"></script>
+<!-- /ui:theme -->
+  <title>LogBan</title>
+<!-- ui:panel-assets -->
+  <link rel="stylesheet" href="assets/fonts/bootstrap-icons.min.css">
+  <link rel="stylesheet" href="assets/adminlte.min.css">
+  <link rel="stylesheet" href="assets/panel-theme.css">
+  <link rel="stylesheet" href="assets/form-modals.css">
+  <script defer src="assets/bootstrap.bundle.min.js"></script>
+  <script defer src="assets/adminlte.min.js"></script>
+  <script defer src="assets/settings.js"></script>
+  <script defer src="assets/table-pager.js"></script>
+  <script defer src="assets/blocks.js"></script>
+  <script defer src="assets/log-sources.js"></script>
+  <link rel="stylesheet" href="assets/air-datepicker-3.6.0/air-datepicker.css">
+  <link rel="stylesheet" href="assets/log-range.css">
+  <link rel="stylesheet" href="assets/log-table.css">
+  <script defer src="assets/air-datepicker-3.6.0/air-datepicker.js"></script>
+  <script defer src="assets/log-range.js"></script>
+  <link rel="stylesheet" href="assets/uplot-1.6.32/uPlot.min.css">
+  <script defer src="assets/uplot-1.6.32/uPlot.iife.min.js"></script>
+  <script defer src="assets/series-chart.js"></script>
+  <script defer src="assets/incidents.js"></script>
+  <script defer src="assets/logs.js"></script>
+  <script defer src="assets/allowlist.js"></script>
+  <script defer src="assets/actions.js"></script>
+  <script defer src="assets/rules.js"></script>
+  <script defer src="assets/panel.js"></script>
+<!-- /ui:panel-assets -->
+  <script defer src="assets/auth.js"></script>
+</head>
+<body class="layout-fixed sidebar-expand-lg bg-body-tertiary" data-page="panel" hidden>
+<!-- ui:layout -->
+    <div class="app-wrapper">
+      <header class="app-header d-flex align-items-center gap-2 px-3" style="min-height: 3.5rem">
+        <h1 id="dashboard-title" data-header-page="dashboard" class="h3 mb-0" hidden>Обзор</h1>
+        <h1 id="incidents-title" data-header-page="incidents" class="h3 mb-0" hidden>Инциденты</h1>
+        <h1 id="logs-title" data-header-page="logs" class="h3 mb-0" hidden>Логи</h1>
+        <h1 id="blocks-title" data-header-page="blocks" class="h3 mb-0" hidden>Текущие блокировки</h1>
+        <div id="hit-range-control" data-header-page="dashboard incidents logs" class="dropdown ms-auto" hidden></div>
+        <h1 id="sources-title" data-header-page="sources" class="h3 mb-0" hidden>Источники логов</h1>
+        <h1 id="rules-title" data-header-page="rules" class="h3 mb-0" hidden>Правила <span id="rule-count" class="badge bg-secondary-subtle text-secondary-emphasis fs-6 align-middle"></span></h1>
+        <h1 id="actions-title" data-header-page="actions" class="h3 mb-0" hidden>Действия <span id="action-count" class="badge bg-secondary-subtle text-secondary-emphasis fs-6 align-middle"></span></h1>
+        <h1 id="allowlist-title" data-header-page="allowlist" class="h3 mb-0" hidden>Белый список</h1>
+      </header>
+      <aside class="app-sidebar">
+        <div class="sidebar-brand">
+          <a href="index.html" class="brand-link">
+            <img class="brand-image" src="assets/logos/lb-shield.svg" width="32" height="32" alt="">
+            <span class="brand-text">LogBan</span>
+          </a>
+        </div>
+        <div class="sidebar-wrapper">
+          <nav class="mt-2" aria-label="Основная навигация">
+            <ul class="nav sidebar-menu flex-column" id="navigation">
+              <li class="nav-item"><a class="nav-link" href="#dashboard"><i class="nav-icon bi bi-speedometer2" aria-hidden="true"></i><p>Обзор</p></a></li>
+              <li class="nav-item"><a class="nav-link" href="#incidents"><i class="nav-icon bi bi-exclamation-triangle" aria-hidden="true"></i><p>Инциденты</p></a></li>
+              <li class="nav-item"><a class="nav-link" href="#logs"><i class="nav-icon bi bi-list-ul" aria-hidden="true"></i><p>Логи</p></a></li>
+              <li class="nav-item"><a class="nav-link" href="#blocks"><i class="nav-icon bi bi-shield-lock" aria-hidden="true"></i><p>Блокировки</p></a></li>
+              <li class="nav-item">
+                <button type="button" class="nav-link w-100 text-start" id="settings-toggle" aria-expanded="false" aria-controls="settings-menu">
+                  <i class="nav-icon bi bi-gear" aria-hidden="true"></i><p>Настройки<i class="nav-arrow bi bi-chevron-right" aria-hidden="true"></i></p>
+                </button>
+                <ul class="nav nav-treeview ps-3" id="settings-menu">
+                  <li class="nav-item"><a class="nav-link" href="#sources"><i class="nav-icon bi bi-journal-text" aria-hidden="true"></i><p>Источники логов</p></a></li>
+                  <li class="nav-item"><a class="nav-link" href="#rules"><i class="nav-icon bi bi-sliders" aria-hidden="true"></i><p>Правила</p></a></li>
+                  <li class="nav-item"><a class="nav-link" href="#actions"><i class="nav-icon bi bi-lightning-charge" aria-hidden="true"></i><p>Действия</p></a></li>
+                  <li class="nav-item"><a class="nav-link" href="#allowlist"><i class="nav-icon bi bi-shield-check" aria-hidden="true"></i><p>Белый список</p></a></li>
+                </ul>
+              </li>
+            </ul>
+          </nav>
+        </div>
+        <footer class="sidebar-account border-top p-2">
+          <ul class="nav sidebar-menu flex-column">
+            <li class="nav-item">
+              <div class="nav-link"><i class="nav-icon bi bi-person" aria-hidden="true"></i><span class="text-truncate" data-session-login>admin@logban.app</span></div>
+            </li>
+            <li class="nav-item">
+              <button type="button" id="logout" class="nav-link w-100 text-start"><i class="nav-icon bi bi-box-arrow-right" aria-hidden="true"></i><span>Выход</span></button>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" href="https://github.com/it-nsk/antiddos" target="_blank" rel="noopener noreferrer" aria-label="Репозиторий LogBan на GitHub, версия v0.7.5"><i class="nav-icon bi bi-github" aria-hidden="true"></i><span>GitHub · v0.7.5</span></a>
+            </li>
+          </ul>
+        </footer>
+      </aside>
+      <main class="app-main"><div id="backend-status" class="alert alert-warning m-3" role="status" hidden></div>
+        <button type="button" class="btn btn-sm btn-outline-secondary d-lg-none ms-3 mt-2" data-lte-toggle="sidebar" aria-label="Открыть меню"><i class="bi bi-list" aria-hidden="true"></i></button>
+        <section id="dashboard" class="container-fluid p-3" aria-labelledby="dashboard-title">
+          <div id="dashboard-detections" class="mt-3"></div>
+          <div id="dashboard-log-charts"></div>
+        </section>
+        <section id="incidents" class="container-fluid p-3" hidden aria-labelledby="incidents-title">
+          <div id="incidents-detections"></div>
+          <div id="detections-card" class="card mb-3"><div class="card-body row g-3">
+            <div class="col-lg-9">
+              <h2 class="h5" id="hit-title">Срабатывания по времени</h2>
+              <div id="hit-chart" role="img" style="height:12rem;overflow:hidden"></div>
+              <div id="hit-axis" class="d-flex justify-content-between text-body-secondary small"></div>
+            </div>
+            <div class="col-lg-3"><h2 class="h6">Правила</h2><div id="hit-legend" class="d-grid gap-1"></div></div>
+          </div></div>
+          <div class="card">
+            <div class="card-header"><h2 class="h5 mb-0">Журнал срабатываний</h2></div>
+            <div class="table-responsive"><table id="hit-table" class="table table-hover align-middle mb-0">
+              <thead><tr><th>Начало (UTC)</th><th>Правило</th><th>Срабатывания</th><th>Уникальные IP</th><th>Всего обращений</th><th>Заблокировано IP</th><th>Среднее время до блокировки</th></tr></thead><tbody id="hit-list"></tbody>
+            </table></div>
+            <div class="card-footer px-2">
+              <div class="d-flex flex-wrap align-items-center gap-3">
+                <div class="d-flex align-items-center gap-2">
+                  <label for="hit-page-size" class="small">Записей на страницу</label>
+                  <select id="hit-page-size" class="form-select form-select-sm w-auto" aria-controls="hit-table">
+                    <option>2</option><option selected>10</option><option>25</option><option>50</option>
+                  </select>
+                </div>
+                <div class="d-flex flex-wrap justify-content-end align-items-center gap-3 ms-auto">
+                  <span class="small text-body-secondary" id="hit-range" role="status"></span>
+                  <nav aria-label="Страницы журнала">
+                    <ul class="pagination pagination-sm mb-0">
+                      <li class="page-item"><button type="button" class="page-link" id="hit-prev" aria-controls="hit-table">Назад</button></li>
+                      <li class="page-item active"><span class="page-link" id="hit-page" aria-current="page"></span></li>
+                      <li class="page-item"><button type="button" class="page-link" id="hit-next" aria-controls="hit-table">Вперёд</button></li>
+                    </ul>
+                  </nav>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section id="logs" class="container-fluid p-3" hidden aria-labelledby="logs-title"><p class="small text-body-secondary">Журнал содержит сохранённые строки срабатываний. Полный поток исходных логов сервер пока не хранит.</p>
+          <div id="logs-log-charts">
+            <div id="log-charts">
+              <div class="card mb-3"><div class="card-body row g-3">
+                <div class="col-lg-9">
+                  <h2 class="h5">Запросов в секунду</h2>
+                  <div id="log-chart" role="img" style="height:12rem;overflow:hidden"></div>
+                  <div id="log-axis" class="d-flex justify-content-between text-body-secondary small"></div>
+                </div>
+                <div class="col-lg-3"><h2 class="h6">Источники логов</h2><div id="log-legend" class="d-grid gap-1"></div></div>
+              </div></div>
+              <div class="card mb-3"><div class="card-body row g-3">
+                <div class="col-lg-9">
+                  <h2 class="h5">Трафик <small class="text-body-secondary">Мб/с</small></h2>
+                  <div id="log-traffic-chart" role="img" style="height:12rem;overflow:hidden"></div>
+                  <div id="log-traffic-axis" class="d-flex justify-content-between text-body-secondary small"></div>
+                </div>
+                <div class="col-lg-3"><h2 class="h6">Источники логов</h2><div id="log-traffic-legend" class="d-grid gap-1"></div></div>
+              </div></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header d-flex align-items-center flex-wrap gap-2">
+              <h2 class="h5 mb-0 me-auto">Последние обращения</h2>
+              <label for="log-source">Источник лога</label><select class="form-select form-select-sm w-auto" id="log-source"><option value="">Выберите лог</option></select>
+            </div>
+            <div id="log-work" hidden>
+            <div class="table-responsive"><table id="log-table" class="table table-hover align-middle mb-0">
+              <colgroup><col class="log-time-col"><col class="log-ip-col"><col></colgroup>
+              <thead><tr id="log-head"></tr></thead><tbody id="log-list"></tbody>
+            </table></div>
+            <div class="card-footer d-flex align-items-center gap-2">
+              <label for="log-page-size" class="small">Записей на страницу</label>
+              <select id="log-page-size" class="form-select form-select-sm w-auto" aria-controls="log-table">
+                <option>2</option><option selected>10</option><option>25</option><option>50</option>
+              </select>
+            </div>
+          </div>
+          </div>
+        </section>
+        <section id="blocks" class="container-fluid p-3" hidden aria-labelledby="blocks-title">
+          <div class="d-flex align-items-center justify-content-end gap-2 mb-1">
+            <button type="button" class="btn btn-primary" id="block-add" hidden>Добавить IP</button>
+          </div>
+          <p class="small text-body-secondary">Локальный список демонстрационного узла</p>
+          <div class="card">
+            <div class="card-body col-lg-6"><label class="form-label" for="block-search">Поиск по IP</label><input type="search" class="form-control" id="block-search"></div>
+            <div class="table-responsive"><table class="table align-middle mb-0">
+              <thead><tr><th>IP-адрес</th><th>Правило</th><th>Дата добавления (UTC)</th><th><span class="visually-hidden">Действия</span></th></tr></thead>
+              <tbody id="block-list"></tbody>
+            </table></div>
+          </div>
+          <p id="block-status" role="status" class="small mt-2"></p>
+        </section>
+        <section id="sources" class="container-fluid p-3" hidden aria-labelledby="sources-title">
+          <div class="d-flex align-items-center justify-content-end flex-wrap gap-2 mb-3">
+            <button type="button" class="btn btn-primary" id="source-add" hidden><i class="bi bi-plus-lg me-1" aria-hidden="true"></i>Добавить источник</button>
+          </div>
+          <div class="card">
+            <div class="table-responsive">
+              <table class="table table-hover align-middle mb-0" id="source-table">
+                <thead><tr><th scope="col">Имя источника</th><th scope="col">Путь к логу</th><th scope="col">Формат</th><th scope="col" id="source-actions"><span class="visually-hidden">Действия</span></th></tr></thead>
+                <tbody id="source-list"></tbody>
+              </table>
+            </div>
+            <div class="card-footer px-2">
+              <div class="d-flex flex-wrap align-items-center gap-3">
+                <div class="d-flex align-items-center gap-2">
+                  <label for="source-page-size" class="small">Записей на страницу</label>
+                  <select id="source-page-size" class="form-select form-select-sm w-auto" aria-controls="source-table">
+                    <option>2</option><option selected>10</option><option>25</option><option>50</option>
+                  </select>
+                </div>
+                <div class="d-flex flex-wrap justify-content-end align-items-center gap-3 ms-auto">
+                  <span class="small text-body-secondary" id="source-range" role="status"></span>
+                  <nav aria-label="Страницы источников логов">
+                    <ul class="pagination pagination-sm mb-0">
+                      <li class="page-item"><button type="button" class="page-link" id="source-prev" aria-controls="source-table">Назад</button></li>
+                      <li class="page-item active"><span class="page-link" id="source-page" aria-current="page"></span></li>
+                      <li class="page-item"><button type="button" class="page-link" id="source-next" aria-controls="source-table">Вперёд</button></li>
+                    </ul>
+                  </nav>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p id="source-status" class="small text-body-secondary mt-2" role="status"></p>
+        </section>
+        <section id="rules" class="container-fluid p-3" hidden aria-labelledby="rules-title">
+          <div class="d-flex align-items-center justify-content-end flex-wrap gap-2 mb-3">
+            <button type="button" class="btn btn-primary" id="rule-add" hidden><i class="bi bi-plus-lg me-1" aria-hidden="true"></i>Добавить правило</button>
+          </div>
+          <div class="card">
+            <div class="table-responsive">
+              <table class="table table-hover align-middle mb-0" id="rule-table">
+                <thead><tr><th scope="col">Правило</th><th scope="col">Источник лога</th><th scope="col">Условие</th><th scope="col">Действие</th><th scope="col">Состояние</th><th scope="col" id="rule-actions"><span class="visually-hidden">Действия с правилом</span></th></tr></thead>
+                <tbody id="rule-list"></tbody>
+              </table>
+            </div>
+            <div class="card-footer px-2">
+              <div class="d-flex flex-wrap align-items-center gap-3">
+                <div class="d-flex align-items-center gap-2">
+                  <label for="rule-page-size" class="small">Записей на страницу</label>
+                  <select id="rule-page-size" class="form-select form-select-sm w-auto" aria-controls="rule-table">
+                    <option>2</option><option selected>10</option><option>25</option><option>50</option>
+                  </select>
+                </div>
+                <div class="d-flex flex-wrap justify-content-end align-items-center gap-3 ms-auto">
+                  <span class="small text-body-secondary" id="rule-range" role="status"></span>
+                  <nav aria-label="Страницы правил">
+                    <ul class="pagination pagination-sm mb-0">
+                      <li class="page-item"><button type="button" class="page-link" id="rule-prev" aria-controls="rule-table">Назад</button></li>
+                      <li class="page-item active"><span class="page-link" id="rule-page" aria-current="page"></span></li>
+                      <li class="page-item"><button type="button" class="page-link" id="rule-next" aria-controls="rule-table">Вперёд</button></li>
+                    </ul>
+                  </nav>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p id="rule-status" class="small mt-2" role="status"></p>
+        </section>
+        <section id="actions" class="container-fluid p-3" hidden aria-labelledby="actions-title">
+          <div class="d-flex align-items-center justify-content-end flex-wrap gap-2 mb-3">
+            <button type="button" class="btn btn-primary" id="action-add" hidden><i class="bi bi-plus-lg me-1" aria-hidden="true"></i>Добавить действие</button>
+          </div>
+          <div class="card">
+            <div class="table-responsive">
+              <table class="table table-hover align-middle mb-0" id="action-table">
+                <thead><tr><th scope="col">Название</th><th scope="col">Состояние</th><th scope="col">Команда</th><th scope="col" id="action-controls"><span class="visually-hidden">Редактирование</span></th></tr></thead>
+                <tbody id="action-list"></tbody>
+              </table>
+            </div>
+            <div class="card-footer px-2">
+              <div class="d-flex flex-wrap align-items-center gap-3">
+                <div class="d-flex align-items-center gap-2">
+                  <label for="action-page-size" class="small">Записей на страницу</label>
+                  <select id="action-page-size" class="form-select form-select-sm w-auto" aria-controls="action-table">
+                    <option>2</option><option selected>10</option><option>25</option><option>50</option>
+                  </select>
+                </div>
+                <div class="d-flex flex-wrap justify-content-end align-items-center gap-3 ms-auto">
+                  <span class="small text-body-secondary" id="action-range" role="status"></span>
+                  <nav aria-label="Страницы действий">
+                    <ul class="pagination pagination-sm mb-0">
+                      <li class="page-item"><button type="button" class="page-link" id="action-prev" aria-controls="action-table">Назад</button></li>
+                      <li class="page-item active"><span class="page-link" id="action-page" aria-current="page"></span></li>
+                      <li class="page-item"><button type="button" class="page-link" id="action-next" aria-controls="action-table">Вперёд</button></li>
+                    </ul>
+                  </nav>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p id="action-status" class="small mt-2" role="status"></p>
+        </section>
+        <section id="allowlist" class="container-fluid p-3" hidden aria-labelledby="allowlist-title">
+          <div id="allow-loading" role="status" class="py-3">
+            <span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>Загрузка белого списка…
+          </div>
+          <div id="allow-failed" role="alert" hidden>Не удалось загрузить белый список. <button type="button" id="allow-retry" class="btn btn-link">Повторить</button></div>
+          <div id="allow-card" hidden class="card">
+            <div class="card-body">
+              <h2 class="h5"><label for="allow-addresses">Глобальный whitelist</label></h2>
+              <p class="mb-2">Действует для всех правил.</p>
+              <p class="form-text" id="allow-help">IPv4, IPv6 или CIDR. Например: 192.0.2.10 или 2001:db8::/32. Разделяйте записи переносом строки, пробелом или запятой.</p>
+              <div class="row">
+                <div class="col-12 col-lg-6">
+                  <label for="allow-mask" class="form-label">Поиск</label>
+                  <div class="position-relative mb-2">
+                    <input type="text" id="allow-mask" class="form-control font-monospace pe-5" placeholder="Начало адреса" spellcheck="false" autocomplete="off">
+                    <button type="button" id="allow-clear" class="btn-close position-absolute top-50 end-0 translate-middle-y me-2" aria-label="Очистить поиск" hidden></button>
+                  </div>
+                  <textarea id="allow-addresses" class="form-control font-monospace" rows="8" style="max-height: 16rem; overflow-y: auto; resize: vertical" spellcheck="false" autocapitalize="off" placeholder="Список пуст" aria-describedby="allow-help allow-error"></textarea>
+                  <div id="allow-error" class="invalid-feedback" aria-live="polite"></div>
+                  <div id="allow-results" hidden class="mt-2">
+                    <p class="small mb-1" id="allow-count" role="status"></p>
+                    <button type="button" id="allow-remove" class="btn btn-outline-danger btn-sm">Удалить показанные</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="card-footer d-flex flex-wrap align-items-center gap-2">
+              <button type="button" id="allow-save" class="btn btn-primary" disabled>Сохранить изменения</button>
+              <button type="button" id="allow-reset" class="btn btn-outline-secondary" disabled>Отменить</button>
+              <span id="allow-status" class="small text-body-secondary" role="status"></span>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <template id="time-range-template">
+      <button data-range-part="range-toggle" type="button" class="btn btn-outline-secondary dropdown-toggle" aria-expanded="false" data-bs-toggle="dropdown" data-bs-auto-close="outside"><i class="bi bi-calendar3 me-1"></i><span class="d-none d-sm-inline" data-range-part="range-label"></span></button>
+      <form data-range-part="range-form" class="dropdown-menu dropdown-menu-end shadow p-3" style="width:min(28rem,calc(100vw - 2.5rem));max-height:75vh;overflow:auto">
+        <div class="row g-2 mb-3">
+          <div class="col-7 range-calendar" data-range-part="calendar"></div>
+          <div class="col-5 border-start" data-range-part="presets"></div>
+        </div>
+        <div class="row g-2 border-top pt-2">
+          <label class="col-sm-6 small">Начало<input data-range-part="from" type="text" autocomplete="off" spellcheck="false" placeholder="ГГГГ-ММ-ДД ЧЧ:ММ" required class="form-control form-control-sm"></label>
+          <label class="col-sm-6 small">Конец<input data-range-part="to" type="text" autocomplete="off" spellcheck="false" placeholder="ГГГГ-ММ-ДД ЧЧ:ММ" required class="form-control form-control-sm"></label>
+        </div>
+        <div class="d-flex justify-content-between align-items-center mt-3"><span class="text-body-secondary small">Часовой пояс UTC</span><button class="btn btn-primary btn-sm">Применить</button></div>
+      </form>
+    </template>
+    <div class="modal" id="block-modal" tabindex="-1" aria-labelledby="block-title" aria-hidden="true">
+      <div class="modal-dialog logban-form-dialog modal-lg modal-dialog-centered modal-dialog-scrollable modal-fullscreen-sm-down">
+        <form class="modal-content" id="block-form">
+          <div class="modal-header">
+            <h2 class="modal-title fs-5" id="block-title">Добавить IP в блокировку</h2>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Закрыть"></button>
+          </div>
+          <div class="modal-body">
+            <label class="form-label" for="block-ip">IP-адрес</label>
+            <input class="form-control font-monospace mb-3" id="block-ip" required autocomplete="off" spellcheck="false">
+            <label class="form-label" for="block-rule">Правило</label>
+            <select class="form-select" id="block-rule"></select>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Отмена</button>
+            <button type="submit" class="btn btn-danger">Заблокировать</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    <div class="modal" id="source-modal" tabindex="-1" aria-labelledby="source-title" aria-hidden="true">
+      <div class="modal-dialog logban-form-dialog modal-lg modal-dialog-centered modal-dialog-scrollable modal-fullscreen-sm-down">
+        <form class="modal-content" id="source-form" novalidate>
+          <div class="modal-header">
+            <h2 class="modal-title fs-5" id="source-title">Добавить источник</h2>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Закрыть"></button>
+          </div>
+          <div class="modal-body">
+            <div class="row g-3">
+              <div class="col-sm-5">
+                <label for="source-name" class="form-label">Имя источника</label>
+                <input class="form-control" id="source-name" placeholder="nginx-access" required spellcheck="false" aria-describedby="source-name-error">
+                <div id="source-name-error" class="invalid-feedback"></div>
+              </div>
+              <div class="col-sm-7">
+                <label for="source-path" class="form-label">Путь к логу</label>
+                <input class="form-control font-monospace" id="source-path" required spellcheck="false" aria-describedby="source-path-error">
+                <div id="source-path-error" class="invalid-feedback"></div>
+              </div>
+              <div class="col-12">
+                <label for="source-format" class="form-label">Формат лога</label>
+                <select class="form-select" id="source-format"></select>
+              </div>
+              <div class="col-12">
+                <label for="source-pattern" class="form-label">Паттерн</label>
+                <textarea class="form-control font-monospace" id="source-pattern" rows="4" required spellcheck="false" autocapitalize="off" aria-describedby="source-pattern-help source-pattern-error"></textarea>
+                <div id="source-pattern-error" class="invalid-feedback"></div>
+                <p id="source-pattern-help" class="form-text mb-0">Для встроенных форматов паттерн показан справочно. Для Nginx log_format укажите строку формата с переменными $remote_addr, $request и другими. Новый источник создаётся с выключенным правилом наблюдения.</p>
+                <details class="mt-3" id="source-help" hidden>
+                  <summary class="text-primary">Пример паттерна и поддерживаемые группы</summary>
+                  <div class="bg-body-tertiary border rounded p-3 mt-2 small">
+                    <p class="mb-1 fw-semibold">Пример строки лога</p>
+                    <code class="d-block text-body text-break mb-3" id="source-example-line"></code>
+                    <p class="mb-1 fw-semibold">Паттерн со всеми группами</p>
+                    <code class="d-block text-body text-break mb-3" id="source-example-pattern"></code>
+                    <p class="mb-2">Оставьте группы для полей своего лога и расставьте между ними разделители из строки.</p>
+                    <dl class="row row-cols-1 row-cols-sm-2 gy-1 mb-0" id="source-groups"></dl>
+                  </div>
+                </details>
+              </div>
+            </div>
+            <div id="source-save-error" class="alert alert-danger mt-3 mb-0" role="alert" hidden></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Отмена</button>
+            <button type="submit" id="source-save" class="btn btn-primary">Сохранить</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    <div class="modal" id="rule-modal" tabindex="-1" aria-labelledby="rule-title" aria-hidden="true">
+      <div class="modal-dialog logban-form-dialog modal-lg modal-dialog-centered modal-dialog-scrollable modal-fullscreen-sm-down">
+        <form class="modal-content" id="rule-form">
+          <div class="modal-header">
+            <h2 class="modal-title fs-5" id="rule-title">Добавить правило</h2>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Закрыть"></button>
+          </div>
+          <div class="modal-body">
+            <div class="row g-3 mb-3 align-items-center">
+              <div class="col-sm-8">
+                <label class="form-label" for="rule-id">Название</label>
+                <input class="form-control" id="rule-id" required spellcheck="false" placeholder="homepage">
+              </div>
+              <div class="col-sm-4">
+                <label class="form-label" id="rule-state-label" for="rule-enabled">Состояние</label>
+                <div class="form-check form-switch py-1 mb-0">
+                  <input class="form-check-input" type="checkbox" role="switch" id="rule-enabled" aria-labelledby="rule-state-label">
+                  <label class="form-check-label" for="rule-enabled" id="rule-state"></label>
+                </div>
+              </div>
+            </div>
+            <fieldset class="border-top pt-3 mb-3">
+              <legend class="float-none fs-6 fw-semibold">Что отслеживать</legend>
+              <div class="row g-3">
+                <div class="col-12">
+                  <label class="form-label" for="rule-source">Источник лога</label>
+                  <select class="form-select" id="rule-source" required></select>
+                </div>
+                <div class="col-12">
+                  <label class="form-label" for="rule-path">Регулярное выражение пути</label>
+                  <input class="form-control font-monospace" id="rule-path" required spellcheck="false">
+                </div>
+                <div class="col-sm-6">
+                  <label class="form-label" for="rule-query">Regex query-параметров</label>
+                  <input class="form-control font-monospace" id="rule-query" placeholder="Например, (?i)union.*select" spellcheck="false">
+                </div>
+                <div class="col-sm-6">
+                  <label class="form-label" for="rule-statuses">HTTP-статусы</label>
+                  <input class="form-control font-monospace" id="rule-statuses" placeholder="Например, 401, 403, 404">
+                </div>
+              </div>
+            </fieldset>
+            <fieldset class="border-top pt-3 mb-3">
+              <legend class="float-none fs-6 fw-semibold">Когда срабатывает</legend>
+              <div class="row g-3">
+                <div class="col-sm-6">
+                  <label class="form-label" for="rule-window">Окно</label>
+                  <input class="form-control font-monospace" id="rule-window" required placeholder="10s">
+                </div>
+                <div class="col-sm-6">
+                  <label class="form-label" for="rule-threshold">Порог</label>
+                  <input class="form-control font-monospace" id="rule-threshold" type="number" min="1" required>
+                </div>
+                <div class="col-sm-6">
+                  <label class="form-label" for="rule-group">Группировка</label>
+                  <select class="form-select" id="rule-group"><option value="ip">IP-адрес</option><option value="path">Путь</option></select>
+                </div>
+                <div class="col-sm-6">
+                  <label class="form-label" for="rule-unique">Что считать</label>
+                  <select class="form-select" id="rule-unique"><option value="">Все совпадения</option><option value="path">Уникальные пути запросов</option><option value="destination_port">Уникальные порты назначения</option></select>
+                </div>
+              </div>
+            </fieldset>
+            <div class="border-top pt-3">
+              <label class="form-label fw-semibold" for="rule-action">Действие правила</label>
+              <select class="form-select" id="rule-action" required></select>
+              <div id="rule-action-command" class="form-text mt-2" hidden></div>
+              <div id="rule-custom-command-options" class="mt-3" hidden>
+                <label class="form-label" for="rule-command">Команда</label>
+                <input class="form-control font-monospace" id="rule-command" placeholder="/usr/local/bin/ban-ip {ip} {duration}">
+                <p class="form-text mb-0">Без shell. Нужен абсолютный путь; разрешены только {ip} и {duration}.</p>
+              </div>
+              <div id="rule-firewall-options" class="mt-3" hidden>
+                <label class="form-label" for="rule-block-duration">Срок блокировки</label>
+                <select class="form-select" id="rule-block-duration">
+                  <option value="">Использовать срок сервера</option>
+                  <option value="5m">5 минут</option>
+                  <option value="15m">15 минут</option>
+                  <option value="1h">1 час</option>
+                  <option value="24h">1 день</option>
+                  <option value="168h">7 дней</option>
+                  <option value="720h">30 дней</option>
+                  <option value="custom">Своё значение</option>
+                  <option value="permanent">До ручного снятия</option>
+                </select>
+                <input class="form-control mt-2" id="rule-block-duration-custom" placeholder="Например: 90s, 15m, 2h30m" hidden>
+                <div class="form-text" id="rule-block-duration-help" hidden>Укажите длительность в формате Go: секунды (s), минуты (m), часы (h), дни — например 90s, 15m или 2h30m.</div>
+                <p class="form-text mb-0">Бессрочная блокировка доступна только для nftables.</p>
+                <div class="form-check form-switch mt-3">
+                  <input class="form-check-input" type="checkbox" role="switch" id="rule-repeat-enabled">
+                  <label class="form-check-label" for="rule-repeat-enabled">Прогрессивная блокировка</label>
+                </div>
+                <div id="rule-repeat-options" class="mt-2" hidden>
+                  <label class="form-label" for="rule-repeat-multiplier">Множитель при повторе</label>
+                  <select class="form-select" id="rule-repeat-multiplier"><option value="2">×2</option><option value="3">×3</option><option value="4">×4</option><option value="5">×5</option><option value="6">×6</option><option value="8">×8</option><option value="10">×10</option><option value="12">×12</option><option value="16">×16</option></select>
+                  <label class="form-label mt-2" for="rule-repeat-max-duration">Максимальный срок</label>
+                  <select class="form-select" id="rule-repeat-max-duration"><option value="15m">15 минут</option><option value="1h">1 час</option><option value="24h">1 день</option><option value="168h">7 дней</option><option value="720h">30 дней</option><option value="custom">Своё значение</option></select>
+                  <input class="form-control mt-2" id="rule-repeat-max-custom" placeholder="Например: 2h30m" hidden>
+                  <p class="form-text mb-0" id="rule-repeat-help">Базовый срок 2m, множитель ×2: 2m → 4m → 8m; не выше указанного максимума. Серия сбрасывается через 7 дней.</p>
+                </div>
+              </div>
+              <div id="rule-captcha-options" class="mt-3" hidden>
+                <label class="form-label" for="rule-captcha-ttl">TTL прохождения CAPTCHA</label>
+                <select class="form-select" id="rule-captcha-ttl">
+                  <option value="5m">5 минут</option><option value="15m">15 минут</option>
+                  <option value="30m">30 минут</option><option value="1h">1 час</option>
+                  <option value="24h">1 день</option>
+                </select>
+                <p class="form-text mb-0">TTL общий для всех правил CAPTCHA этого soft-block-сайта.</p>
+              </div>
+            </div>
+            <div class="alert alert-danger mt-3 mb-0" id="rule-error" role="alert" hidden></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Отмена</button>
+            <button type="submit" class="btn btn-primary" id="rule-save">Сохранить</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    <div class="modal" id="action-modal" tabindex="-1" aria-labelledby="action-title" aria-hidden="true">
+      <div class="modal-dialog logban-form-dialog modal-lg modal-dialog-centered modal-dialog-scrollable modal-fullscreen-sm-down">
+        <form class="modal-content" id="action-form">
+          <div class="modal-header">
+            <h2 class="modal-title fs-5" id="action-title">Добавить действие</h2>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Закрыть"></button>
+          </div>
+          <div class="modal-body">
+            <div class="row g-3 mb-3 align-items-center">
+              <div class="col-sm-8">
+                <label class="form-label" for="action-name">Название</label>
+                <input class="form-control" id="action-name" required>
+              </div>
+              <div class="col-sm-4">
+                <label class="form-label" id="action-state-label" for="action-enabled">Состояние</label>
+                <div class="form-check form-switch py-1 mb-0">
+                  <input class="form-check-input" type="checkbox" role="switch" id="action-enabled" aria-labelledby="action-state-label">
+                  <label class="form-check-label" for="action-enabled" id="action-state"></label>
+                </div>
+              </div>
+            </div>
+            <label class="form-label" for="action-command">Команда</label>
+            <textarea class="form-control font-monospace" id="action-command" rows="3" spellcheck="false" autocapitalize="off"></textarea>
+            <div class="alert alert-danger mt-3 mb-0" id="action-error" role="alert" hidden></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Отмена</button>
+            <button type="submit" class="btn btn-primary" id="action-save">Сохранить</button>
+          </div>
+        </form>
+      </div>
+    </div>
+<!-- /ui:layout -->
+</body>
+</html>

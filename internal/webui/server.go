@@ -142,7 +142,7 @@ func New(o Options, auth *webauth.Store, backend Backend, logger *slog.Logger) (
 			fail(w, 405, "Method not allowed")
 			return
 		}
-		if r.URL.Path != "/" && !strings.HasPrefix(r.URL.Path, "/assets/") {
+		if r.URL.Path != "/" && r.URL.Path != "/index.html" && r.URL.Path != "/login.html" && !strings.HasPrefix(r.URL.Path, "/assets/") {
 			http.NotFound(w, r)
 			return
 		}
@@ -447,6 +447,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		Remember *bool  `json:"remember,omitempty"`
 	}
 	if err := body(w, r, &in); err != nil {
 		fail(w, 400, err.Error())
@@ -479,7 +480,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/", HttpOnly: true, Secure: s.origin.Scheme == "https", SameSite: http.SameSiteStrictMode, MaxAge: int(webauth.SessionTTL.Seconds())})
+	maxAge := int(webauth.SessionTTL.Seconds())
+	if in.Remember != nil && !*in.Remember {
+		maxAge = 0
+	}
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/", HttpOnly: true, Secure: s.origin.Scheme == "https", SameSite: http.SameSiteStrictMode, MaxAge: maxAge})
 	s.logger.Info("web login", "user", session.User.Username)
 	writeJSON(w, 200, session)
 }
@@ -516,7 +521,10 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, v webauth.Ses
 	// Stored traffic resolution is 15 seconds; return the actual aligned bounds.
 	from = from / 15 * 15
 	to = (to + 14) / 15 * 15
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	// Historical dashboard ranges may aggregate several thousand buckets and
+	// hundreds of thousands of detections. Five seconds causes a false 503
+	// while the daemon is still producing a valid bounded response.
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	data, err := s.backend.Dashboard(ctx, time.Unix(from, 0), time.Unix(to, 0), before, 100)
 	if err != nil {

@@ -80,7 +80,7 @@ func TestSecurityExampleConfigDecodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.BlockMode != BlockModeDryRun || len(cfg.LogSources) != 4 || len(cfg.Engine.Rules) != 9 {
+	if cfg.BlockMode != BlockModeHybrid || len(cfg.LogSources) != 4 || len(cfg.Engine.Rules) != 9 {
 		t.Fatalf("unexpected security example: mode=%s sources=%d rules=%d", cfg.BlockMode, len(cfg.LogSources), len(cfg.Engine.Rules))
 	}
 	if cfg.Engine.Rules[7].Enabled || cfg.Engine.Rules[7].Type != "cardinality" {

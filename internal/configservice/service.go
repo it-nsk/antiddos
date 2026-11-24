@@ -29,20 +29,24 @@ type Service struct {
 	mu   sync.Mutex
 }
 type Rule struct {
-	ID         string   `json:"id"`
-	Enabled    bool     `json:"enabled"`
-	Type       string   `json:"type,omitempty"`
-	Action     string   `json:"action,omitempty"`
-	LogSource  string   `json:"log_source"`
-	PathRegex  string   `json:"path_regex"`
-	QueryRegex string   `json:"query_regex,omitempty"`
-	Statuses   []int    `json:"statuses,omitempty"`
-	Methods    []string `json:"methods,omitempty"`
-	UniqueBy   string   `json:"unique_by,omitempty"`
-	GroupBy    string   `json:"group_by"`
-	Window     string   `json:"window"`
-	Threshold  int      `json:"threshold"`
-	IgnoreIPs  []string `json:"ignore_ips"`
+	ID                     string   `json:"id"`
+	Enabled                bool     `json:"enabled"`
+	Type                   string   `json:"type,omitempty"`
+	Action                 string   `json:"action,omitempty"`
+	Command                string   `json:"command,omitempty"`
+	BlockDuration          string   `json:"block_duration,omitempty"`
+	RepeatBlockMultiplier  int      `json:"repeat_block_multiplier,omitempty"`
+	RepeatBlockMaxDuration string   `json:"repeat_block_max_duration,omitempty"`
+	LogSource              string   `json:"log_source"`
+	PathRegex              string   `json:"path_regex"`
+	QueryRegex             string   `json:"query_regex,omitempty"`
+	Statuses               []int    `json:"statuses,omitempty"`
+	Methods                []string `json:"methods,omitempty"`
+	UniqueBy               string   `json:"unique_by,omitempty"`
+	GroupBy                string   `json:"group_by"`
+	Window                 string   `json:"window"`
+	Threshold              int      `json:"threshold"`
+	IgnoreIPs              []string `json:"ignore_ips"`
 }
 type Document struct {
 	Revision          string                   `json:"revision"`
@@ -51,7 +55,7 @@ type Document struct {
 	Rules             []Rule                   `json:"rules"`
 	LogSources        []config.LogSourceConfig `json:"-"`
 	Sources           []Source                 `json:"sources"`
-	BlockMode         string                   `json:"block_mode"`
+	BlockMode         string                   `json:"-"`
 	SoftBlock         json.RawMessage          `json:"soft_block,omitempty"`
 }
 type Source struct {
@@ -61,30 +65,36 @@ type Source struct {
 	LogFormat string `json:"log_format,omitempty"`
 }
 type Update struct {
-	Revision          string                `json:"revision"`
-	IgnoreIPs         *[]string             `json:"ignore_ips"`
-	Rules             map[string]RuleUpdate `json:"rules"`
-	BlockMode         *string               `json:"block_mode,omitempty"`
-	CookieTTL         *string               `json:"cookie_ttl,omitempty"`
-	ConfirmRealBlocks bool                  `json:"confirm_real_blocks,omitempty"`
-	AddRules          []Rule                `json:"add_rules,omitempty"`
-	DeleteRules       []string              `json:"delete_rules,omitempty"`
-	AddSources        []Source              `json:"add_sources,omitempty"`
+	Revision  string                `json:"revision"`
+	IgnoreIPs *[]string             `json:"ignore_ips"`
+	Rules     map[string]RuleUpdate `json:"rules"`
+	// BlockMode is retained only for source compatibility with callers. The
+	// web API no longer accepts a global mode: actions belong to rules.
+	BlockMode         *string  `json:"-"`
+	CookieTTL         *string  `json:"cookie_ttl,omitempty"`
+	ConfirmRealBlocks bool     `json:"confirm_real_blocks,omitempty"`
+	AddRules          []Rule   `json:"add_rules,omitempty"`
+	DeleteRules       []string `json:"delete_rules,omitempty"`
+	AddSources        []Source `json:"add_sources,omitempty"`
 }
 type RuleUpdate struct {
-	Enabled    *bool     `json:"enabled,omitempty"`
-	LogSource  *string   `json:"log_source,omitempty"`
-	IgnoreIPs  *[]string `json:"ignore_ips"`
-	PathRegex  *string   `json:"path_regex"`
-	QueryRegex *string   `json:"query_regex,omitempty"`
-	Statuses   *[]int    `json:"statuses,omitempty"`
-	Methods    *[]string `json:"methods,omitempty"`
-	UniqueBy   *string   `json:"unique_by,omitempty"`
-	Action     *string   `json:"action,omitempty"`
-	Window     *string   `json:"window,omitempty"`
-	Threshold  *int      `json:"threshold,omitempty"`
-	GroupBy    *string   `json:"group_by,omitempty"`
-	Type       *string   `json:"type,omitempty"`
+	Enabled                *bool     `json:"enabled,omitempty"`
+	LogSource              *string   `json:"log_source,omitempty"`
+	IgnoreIPs              *[]string `json:"ignore_ips"`
+	PathRegex              *string   `json:"path_regex"`
+	QueryRegex             *string   `json:"query_regex,omitempty"`
+	Statuses               *[]int    `json:"statuses,omitempty"`
+	Methods                *[]string `json:"methods,omitempty"`
+	UniqueBy               *string   `json:"unique_by,omitempty"`
+	Action                 *string   `json:"action,omitempty"`
+	Command                *string   `json:"command,omitempty"`
+	BlockDuration          *string   `json:"block_duration,omitempty"`
+	RepeatBlockMultiplier  *int      `json:"repeat_block_multiplier,omitempty"`
+	RepeatBlockMaxDuration *string   `json:"repeat_block_max_duration,omitempty"`
+	Window                 *string   `json:"window,omitempty"`
+	Threshold              *int      `json:"threshold,omitempty"`
+	GroupBy                *string   `json:"group_by,omitempty"`
+	Type                   *string   `json:"type,omitempty"`
 }
 
 func revision(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
@@ -129,7 +139,17 @@ func document(data []byte) (Document, error) {
 		if ips == nil {
 			ips = []string{}
 		}
-		d.Rules = append(d.Rules, Rule{ID: r.ID, Enabled: r.Enabled, Type: r.Type, Action: r.Action, LogSource: r.LogSource, PathRegex: r.PathRegex, QueryRegex: r.QueryRegex, Statuses: r.Statuses, Methods: r.Methods, UniqueBy: r.UniqueBy, GroupBy: r.GroupBy, Window: r.Window.String(), Threshold: r.Threshold, IgnoreIPs: ips})
+		blockDuration := ""
+		if r.BlockPermanent {
+			blockDuration = "permanent"
+		} else if r.BlockDuration != 0 {
+			blockDuration = r.BlockDuration.String()
+		}
+		repeatMax := ""
+		if r.RepeatBlockMaxDuration != 0 {
+			repeatMax = r.RepeatBlockMaxDuration.String()
+		}
+		d.Rules = append(d.Rules, Rule{ID: r.ID, Enabled: r.Enabled, Type: r.Type, Action: r.Action, Command: r.Command, BlockDuration: blockDuration, RepeatBlockMultiplier: r.RepeatBlockMultiplier, RepeatBlockMaxDuration: repeatMax, LogSource: r.LogSource, PathRegex: r.PathRegex, QueryRegex: r.QueryRegex, Statuses: r.Statuses, Methods: r.Methods, UniqueBy: r.UniqueBy, GroupBy: r.GroupBy, Window: r.Window.String(), Threshold: r.Threshold, IgnoreIPs: ips})
 	}
 	for _, v := range cfg.LogSources {
 		d.Sources = append(d.Sources, Source{ID: v.ID, Path: v.Path, Format: v.Format, LogFormat: v.LogFormat})
@@ -216,13 +236,34 @@ func (s *Service) Save(update Update) (Document, error) {
 		}
 		if ruleUpdate.Action != nil {
 			action := *ruleUpdate.Action
-			if action != "" && action != config.RuleActionDryRun && action != config.RuleActionSoftBlock && action != config.RuleActionNFTables && action != config.RuleActionIPTables {
+			if action != "" && action != config.RuleActionDryRun && action != config.RuleActionSoftBlock && action != config.RuleActionNFTables && action != config.RuleActionIPTables && action != config.RuleActionCustom {
 				return Document{}, fmt.Errorf("unsupported action %q for rule %q", action, id)
+			}
+			if action == config.RuleActionCustom && ruleUpdate.Command == nil {
+				return Document{}, fmt.Errorf("custom action for rule %q requires command", id)
 			}
 			for _, current := range cfg.Engine.Rules {
 				if current.ID == id && (action == config.RuleActionNFTables || action == config.RuleActionIPTables) && current.Action != action && !update.ConfirmRealBlocks {
 					return Document{}, fmt.Errorf("switching a rule to real firewall blocking requires explicit confirmation")
 				}
+			}
+		}
+		if ruleUpdate.BlockDuration != nil {
+			value := *ruleUpdate.BlockDuration
+			if value != "" && value != "permanent" {
+				duration, err := time.ParseDuration(value)
+				if err != nil || duration < time.Second {
+					return Document{}, fmt.Errorf("block_duration for rule %q must be permanent or a positive duration", id)
+				}
+			}
+		}
+		if ruleUpdate.RepeatBlockMultiplier != nil && (*ruleUpdate.RepeatBlockMultiplier < 1 || *ruleUpdate.RepeatBlockMultiplier > 16) {
+			return Document{}, fmt.Errorf("repeat_block_multiplier for rule %q must be between 1 and 16", id)
+		}
+		if ruleUpdate.RepeatBlockMaxDuration != nil && *ruleUpdate.RepeatBlockMaxDuration != "" {
+			duration, err := time.ParseDuration(*ruleUpdate.RepeatBlockMaxDuration)
+			if err != nil || duration < time.Second {
+				return Document{}, fmt.Errorf("repeat_block_max_duration for rule %q must be a positive duration", id)
 			}
 		}
 	}
@@ -297,8 +338,20 @@ func (s *Service) Save(update Update) (Document, error) {
 		var rules []map[string]any
 		for _, r := range cfg.Engine.Rules {
 			rule := map[string]any{"id": r.ID, "enabled": r.Enabled, "type": r.Type, "log_source": r.LogSource, "path_regex": r.PathRegex, "query_regex": r.QueryRegex, "statuses": r.Statuses, "methods": r.Methods, "unique_by": r.UniqueBy, "window": r.Window.String(), "threshold": r.Threshold, "group_by": r.GroupBy}
+			if r.RepeatBlockMultiplier > 1 {
+				rule["repeat_block_multiplier"] = r.RepeatBlockMultiplier
+				rule["repeat_block_max_duration"] = r.RepeatBlockMaxDuration.String()
+			}
+			if r.BlockPermanent {
+				rule["block_duration"] = "permanent"
+			} else if r.BlockDuration != 0 {
+				rule["block_duration"] = r.BlockDuration.String()
+			}
 			if r.Action != "" {
 				rule["action"] = r.Action
+			}
+			if r.Command != "" {
+				rule["command"] = r.Command
 			}
 			rules = append(rules, rule)
 		}
@@ -312,7 +365,7 @@ func (s *Service) Save(update Update) (Document, error) {
 		engine["ignore_ips"], _ = json.Marshal(ips)
 	}
 	if update.BlockMode != nil {
-		raw["block_mode"], _ = json.Marshal(*update.BlockMode)
+		return Document{}, fmt.Errorf("global block_mode is no longer editable; set action on the rule")
 	}
 	if update.CookieTTL != nil {
 		var soft map[string]json.RawMessage
@@ -332,6 +385,29 @@ func (s *Service) Save(update Update) (Document, error) {
 				rule["log_source"], _ = json.Marshal("default")
 			}
 		}
+	}
+	// Older configurations used one global block mode. On the first web save,
+	// preserve their effective behavior as explicit rule actions and move to
+	// the per-rule routing mode.
+	if cfg.BlockMode != config.BlockModeHybrid {
+		byID := make(map[string]config.RuleConfig, len(cfg.Engine.Rules))
+		for _, configured := range cfg.Engine.Rules {
+			byID[configured.ID] = configured
+		}
+		for _, rule := range rules {
+			var id string
+			_ = json.Unmarshal(rule["id"], &id)
+			configured := byID[id]
+			action := configured.Action
+			if action == "" {
+				action = config.EffectiveRuleAction(cfg.BlockMode, configured)
+			}
+			if action == "" {
+				action = config.RuleActionDryRun
+			}
+			rule["action"], _ = json.Marshal(action)
+		}
+		raw["block_mode"], _ = json.Marshal(config.BlockModeHybrid)
 	}
 	deleteSet := map[string]bool{}
 	for _, id := range update.DeleteRules {
@@ -356,8 +432,17 @@ func (s *Service) Save(update Update) (Document, error) {
 		if added.GroupBy != "ip" && added.GroupBy != "path" {
 			return Document{}, fmt.Errorf("unsupported group_by %q", added.GroupBy)
 		}
-		if added.Action != "" && added.Action != config.RuleActionDryRun && added.Action != config.RuleActionSoftBlock && added.Action != config.RuleActionNFTables {
+		if added.Action != "" && added.Action != config.RuleActionDryRun && added.Action != config.RuleActionSoftBlock && added.Action != config.RuleActionNFTables && added.Action != config.RuleActionIPTables && added.Action != config.RuleActionCustom {
 			return Document{}, fmt.Errorf("unsupported action %q", added.Action)
+		}
+		if added.Action == config.RuleActionCustom && added.Command == "" {
+			return Document{}, fmt.Errorf("custom action for rule %q requires command", added.ID)
+		}
+		if added.BlockDuration != "" && added.BlockDuration != "permanent" {
+			duration, err := time.ParseDuration(added.BlockDuration)
+			if err != nil || duration < time.Second {
+				return Document{}, fmt.Errorf("block_duration for rule %q must be permanent or a positive duration", added.ID)
+			}
 		}
 		if added.Type == "" {
 			added.Type = "rate"
@@ -369,8 +454,18 @@ func (s *Service) Save(update Update) (Document, error) {
 			return Document{}, fmt.Errorf("signature rule %q requires window 1s and threshold 1", added.ID)
 		}
 		m := map[string]any{"id": added.ID, "enabled": added.Enabled, "type": added.Type, "log_source": added.LogSource, "path_regex": added.PathRegex, "query_regex": added.QueryRegex, "statuses": added.Statuses, "methods": added.Methods, "unique_by": added.UniqueBy, "window": added.Window, "threshold": added.Threshold, "group_by": added.GroupBy, "ignore_ips": added.IgnoreIPs}
+		if added.BlockDuration != "" {
+			m["block_duration"] = added.BlockDuration
+		}
 		if added.Action != "" {
 			m["action"] = added.Action
+		}
+		if added.Command != "" {
+			m["command"] = added.Command
+		}
+		if added.RepeatBlockMultiplier > 1 {
+			m["repeat_block_multiplier"] = added.RepeatBlockMultiplier
+			m["repeat_block_max_duration"] = added.RepeatBlockMaxDuration
 		}
 		b, _ := json.Marshal(m)
 		var rm map[string]json.RawMessage
@@ -402,6 +497,31 @@ func (s *Service) Save(update Update) (Document, error) {
 					delete(r, "action")
 				} else {
 					r["action"], _ = json.Marshal(*ruleUpdate.Action)
+				}
+			}
+			if ruleUpdate.Command != nil {
+				r["command"], _ = json.Marshal(*ruleUpdate.Command)
+			}
+			if ruleUpdate.BlockDuration != nil {
+				if *ruleUpdate.BlockDuration == "" {
+					delete(r, "block_duration")
+				} else {
+					r["block_duration"], _ = json.Marshal(*ruleUpdate.BlockDuration)
+				}
+			}
+			if ruleUpdate.RepeatBlockMultiplier != nil {
+				if *ruleUpdate.RepeatBlockMultiplier == 1 {
+					delete(r, "repeat_block_multiplier")
+					delete(r, "repeat_block_max_duration")
+				} else {
+					r["repeat_block_multiplier"], _ = json.Marshal(*ruleUpdate.RepeatBlockMultiplier)
+				}
+			}
+			if ruleUpdate.RepeatBlockMaxDuration != nil {
+				if *ruleUpdate.RepeatBlockMaxDuration == "" {
+					delete(r, "repeat_block_max_duration")
+				} else {
+					r["repeat_block_max_duration"], _ = json.Marshal(*ruleUpdate.RepeatBlockMaxDuration)
 				}
 			}
 			if ruleUpdate.IgnoreIPs != nil {

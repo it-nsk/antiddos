@@ -17,6 +17,10 @@ import (
 
 const DefaultPath = "/etc/antiddos/config.json"
 const DefaultDatabasePath = "/var/lib/antiddos/antiddos.sqlite"
+
+// Older configuration files which omit block_mode retain their safe dry-run
+// behavior. New installation templates explicitly use hybrid with a dry-run
+// action on every rule.
 const DefaultBlockMode = "dry_run"
 const DefaultBlockDuration = 5 * time.Minute
 
@@ -33,6 +37,7 @@ const (
 	RuleActionNFTables  = "nftables"
 	RuleActionIPTables  = "iptables"
 	RuleActionSoftBlock = "soft_block"
+	RuleActionCustom    = "custom"
 )
 
 const (
@@ -95,16 +100,28 @@ type RuleConfig struct {
 	ExplicitlyDisabled bool
 	Type               string
 	Action             string
-	LogSource          string
-	PathRegex          string
-	QueryRegex         string
-	Statuses           []int
-	Methods            []string
-	UniqueBy           string
-	Window             time.Duration
-	Threshold          int
-	GroupBy            string
-	IgnoreIPs          []string
+	Command            string
+	// BlockDuration overrides the service default for firewall actions. A zero
+	// value retains Config.BlockDuration.
+	BlockDuration time.Duration
+	// BlockPermanent requests an effectively non-expiring nftables lease.
+	// It is deliberately unavailable to iptables/ipset, whose timeout model
+	// cannot represent a durable lease safely.
+	BlockPermanent bool
+	// RepeatBlockMultiplier increases a later block for the same rule and IP.
+	// A value of one disables escalation.
+	RepeatBlockMultiplier  int
+	RepeatBlockMaxDuration time.Duration
+	LogSource              string
+	PathRegex              string
+	QueryRegex             string
+	Statuses               []int
+	Methods                []string
+	UniqueBy               string
+	Window                 time.Duration
+	Threshold              int
+	GroupBy                string
+	IgnoreIPs              []string
 }
 
 // EffectiveRuleAction returns the action the daemon applies for a rule in the
@@ -185,20 +202,24 @@ type rawEngineConfig struct {
 }
 
 type rawRuleConfig struct {
-	ID         string   `json:"id"`
-	Enabled    *bool    `json:"enabled"`
-	Type       string   `json:"type"`
-	Action     string   `json:"action"`
-	LogSource  *string  `json:"log_source"`
-	PathRegex  *string  `json:"path_regex"`
-	QueryRegex string   `json:"query_regex"`
-	Statuses   []int    `json:"statuses"`
-	Methods    []string `json:"methods"`
-	UniqueBy   string   `json:"unique_by"`
-	Window     *string  `json:"window"`
-	Threshold  *int     `json:"threshold"`
-	GroupBy    *string  `json:"group_by"`
-	IgnoreIPs  []string `json:"ignore_ips"`
+	ID                     string   `json:"id"`
+	Enabled                *bool    `json:"enabled"`
+	Type                   string   `json:"type"`
+	Action                 string   `json:"action"`
+	Command                string   `json:"command"`
+	BlockDuration          string   `json:"block_duration"`
+	RepeatBlockMultiplier  int      `json:"repeat_block_multiplier"`
+	RepeatBlockMaxDuration string   `json:"repeat_block_max_duration"`
+	LogSource              *string  `json:"log_source"`
+	PathRegex              *string  `json:"path_regex"`
+	QueryRegex             string   `json:"query_regex"`
+	Statuses               []int    `json:"statuses"`
+	Methods                []string `json:"methods"`
+	UniqueBy               string   `json:"unique_by"`
+	Window                 *string  `json:"window"`
+	Threshold              *int     `json:"threshold"`
+	GroupBy                *string  `json:"group_by"`
+	IgnoreIPs              []string `json:"ignore_ips"`
 }
 
 func Load(path string) (Config, error) { return LoadWithLogFile(path, "") }
@@ -619,6 +640,37 @@ func parseRule(raw rawRuleConfig) (RuleConfig, error) {
 	if *raw.Threshold < 1 {
 		return RuleConfig{}, fmt.Errorf("threshold must be at least 1")
 	}
+	blockDuration := time.Duration(0)
+	blockPermanent := false
+	repeatMultiplier := raw.RepeatBlockMultiplier
+	repeatMax := time.Duration(0)
+	if repeatMultiplier == 0 {
+		repeatMultiplier = 1
+	}
+	if repeatMultiplier < 1 || repeatMultiplier > 16 {
+		return RuleConfig{}, fmt.Errorf("repeat_block_multiplier must be between 1 and 16")
+	}
+	if raw.RepeatBlockMaxDuration != "" {
+		var err error
+		repeatMax, err = time.ParseDuration(raw.RepeatBlockMaxDuration)
+		if err != nil || repeatMax < time.Second {
+			return RuleConfig{}, fmt.Errorf("repeat_block_max_duration must be a positive duration")
+		}
+	}
+	if repeatMultiplier > 1 && repeatMax == 0 {
+		return RuleConfig{}, fmt.Errorf("repeat_block_max_duration is required when repeat_block_multiplier is greater than 1")
+	}
+	if raw.BlockDuration != "" {
+		if raw.BlockDuration == "permanent" {
+			blockPermanent = true
+		} else {
+			var err error
+			blockDuration, err = time.ParseDuration(raw.BlockDuration)
+			if err != nil || blockDuration < time.Second {
+				return RuleConfig{}, fmt.Errorf("block_duration must be permanent or a positive duration")
+			}
+		}
+	}
 	ruleType := strings.TrimSpace(raw.Type)
 	if ruleType == "" {
 		ruleType = "rate"
@@ -649,7 +701,7 @@ func parseRule(raw rawRuleConfig) (RuleConfig, error) {
 	if raw.Enabled != nil {
 		enabled = *raw.Enabled
 	}
-	return RuleConfig{ID: raw.ID, Enabled: enabled, ExplicitlyDisabled: raw.Enabled != nil && !*raw.Enabled, Type: ruleType, Action: strings.TrimSpace(raw.Action), LogSource: logSource, PathRegex: *raw.PathRegex, QueryRegex: raw.QueryRegex, Statuses: raw.Statuses, Methods: methods, UniqueBy: raw.UniqueBy, Window: window, Threshold: *raw.Threshold, GroupBy: *raw.GroupBy}, nil
+	return RuleConfig{ID: raw.ID, Enabled: enabled, ExplicitlyDisabled: raw.Enabled != nil && !*raw.Enabled, Type: ruleType, Action: strings.TrimSpace(raw.Action), Command: strings.TrimSpace(raw.Command), BlockDuration: blockDuration, BlockPermanent: blockPermanent, RepeatBlockMultiplier: repeatMultiplier, RepeatBlockMaxDuration: repeatMax, LogSource: logSource, PathRegex: *raw.PathRegex, QueryRegex: raw.QueryRegex, Statuses: raw.Statuses, Methods: methods, UniqueBy: raw.UniqueBy, Window: window, Threshold: *raw.Threshold, GroupBy: *raw.GroupBy}, nil
 }
 
 func canonicalHTTPMethods(values []string) ([]string, error) {
@@ -676,10 +728,26 @@ func validateRuleActions(mode string, engine EngineConfig) error {
 		if mode == BlockModeHybrid && action == "" {
 			return fmt.Errorf("engine.rules[%d]: action is required in hybrid mode", index)
 		}
-		if action != "" && action != RuleActionDryRun && action != RuleActionSoftBlock && action != RuleActionNFTables && action != RuleActionIPTables {
+		if action != "" && action != RuleActionDryRun && action != RuleActionSoftBlock && action != RuleActionNFTables && action != RuleActionIPTables && action != RuleActionCustom {
 			return fmt.Errorf("engine.rules[%d]: unsupported action %q", index, action)
 		}
+		if action == RuleActionCustom {
+			parts := strings.Fields(rule.Command)
+			if len(parts) == 0 || !strings.HasPrefix(parts[0], "/") || strings.ContainsAny(rule.Command, "\x00\r\n") {
+				return fmt.Errorf("engine.rules[%d]: custom action command must start with an absolute binary path", index)
+			}
+			unknownPlaceholders := strings.ReplaceAll(strings.ReplaceAll(rule.Command, "{ip}", ""), "{duration}", "")
+			if strings.ContainsAny(unknownPlaceholders, "{}") {
+				return fmt.Errorf("engine.rules[%d]: custom action only permits {ip} and {duration} placeholders", index)
+			}
+		}
 		effective := EffectiveRuleAction(mode, rule)
+		if rule.RepeatBlockMultiplier > 1 && effective != RuleActionNFTables && effective != RuleActionIPTables {
+			return fmt.Errorf("engine.rules[%d]: progressive blocking requires nftables or iptables", index)
+		}
+		if rule.BlockPermanent && effective == RuleActionIPTables {
+			return fmt.Errorf("engine.rules[%d]: permanent blocks require nftables", index)
+		}
 		if (effective == RuleActionSoftBlock || effective == RuleActionNFTables || effective == RuleActionIPTables) && rule.GroupBy != "ip" {
 			return fmt.Errorf("engine.rules[%d]: effective action %q requires group_by %q", index, effective, "ip")
 		}
@@ -690,7 +758,7 @@ func validateRuleActions(mode string, engine EngineConfig) error {
 func defaultEngine() EngineConfig {
 	return EngineConfig{Rules: []RuleConfig{{
 		ID: "homepage", PathRegex: defaultPathRegex, Window: defaultWindow,
-		Threshold: defaultThreshold, GroupBy: "ip",
+		Threshold: defaultThreshold, GroupBy: "ip", Action: RuleActionDryRun,
 	}}}
 }
 

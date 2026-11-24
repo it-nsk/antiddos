@@ -1,0 +1,5 @@
+@media (min-width: 576px) {
+  .logban-form-dialog > .modal-content {
+    height: min(40rem, 100%);
+  }
+}

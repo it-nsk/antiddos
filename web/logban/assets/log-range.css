@@ -1,0 +1,16 @@
+.range-calendar .air-datepicker {
+  --adp-width: 100%;
+  --adp-font-family: var(--bs-body-font-family);
+  --adp-background-color: var(--bs-body-bg);
+  --adp-color: var(--bs-body-color);
+  --adp-day-name-color: var(--bs-secondary-color);
+  --adp-color-secondary: var(--bs-secondary-color);
+  --adp-background-color-hover: var(--bs-tertiary-bg);
+  --adp-cell-background-color-hover: var(--bs-tertiary-bg);
+  --adp-cell-background-color-selected: var(--bs-primary);
+  --adp-cell-background-color-selected-hover: var(--bs-link-hover-color);
+  --adp-background-color-in-range: rgba(var(--bs-primary-rgb), .14);
+  --adp-background-color-in-range-focused: rgba(var(--bs-primary-rgb), .22);
+  --adp-border-color-inner: var(--bs-border-color);
+  border: 0;
+}

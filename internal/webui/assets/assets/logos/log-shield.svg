@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="512" height="512">
+  <title>LogBan — щит из строк лога</title>
+  <style>
+    svg { color: #192d42; }
+    @media (prefers-color-scheme: dark) { svg { color: #e1ecf6; } }
+  </style>
+  <path fill="currentColor" fill-rule="evenodd" d="
+    M64 6 Q86 17 114 20 V56 C114 84 97 105 64 122 C31 105 14 84 14 56 V20 Q42 17 64 6 Z
+    M32 37 H96 V45 H32 Z
+    M32 54 H81 V62 H32 Z
+    M37 71 H60 V79 H37 Z
+    M66 71 H75 V79 H66 Z"/>
+</svg>

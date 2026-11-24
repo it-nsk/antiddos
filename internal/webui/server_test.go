@@ -302,3 +302,21 @@ func TestHistoricalJobsRequireExplicitStartupBoundary(t *testing.T) {
 		t.Fatalf("POST disabled history jobs = %d: %s", w.Code, w.Body.String())
 	}
 }
+
+func TestLoginRememberCookie(t *testing.T) {
+	s := fixtureServer(t)
+	for _, remember := range []bool{false, true} {
+		payload, _ := json.Marshal(map[string]any{"username": "admin", "password": "long-enough-password", "remember": remember})
+		w := request(s, "POST", "/api/login", string(payload), nil, "", s.origin.String())
+		if w.Code != 200 {
+			t.Fatalf("login: %d %s", w.Code, w.Body.String())
+		}
+		cookies := w.Result().Cookies()
+		if len(cookies) != 1 || (cookies[0].MaxAge > 0) != remember {
+			t.Fatalf("unexpected cookie lifetime for remember=%v: %v", remember, cookies)
+		}
+		if !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
+			t.Fatal("cookie protections missing")
+		}
+	}
+}

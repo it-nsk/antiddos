@@ -1,0 +1,33 @@
+#log-table {
+  table-layout: fixed;
+  min-width: 26rem;
+}
+.log-time-col { width: 8rem; }
+.log-ip-col { width: 10.5rem; }
+.log-disclosure {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  width: 100%;
+  border: 0;
+  padding: .2rem 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.log-http-summary {
+  display: grid;
+  grid-template-columns: 4.5em 3ch minmax(0, 1fr) auto;
+  font-variant-numeric: tabular-nums;
+}
+.log-disclosure i { color: var(--bs-secondary-color); }
+.log-disclosure[aria-expanded="true"] i { transform: rotate(180deg); }
+.log-raw { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 575px) {
+  #log-table { min-width: 26rem; font-size: .875rem; }
+  #log-table th, #log-table td { padding-inline: .25rem; }
+  .log-time-col { width: 6.8rem; }
+  .log-ip-col { width: 7.8rem; }
+  #log-table th:last-child { white-space: normal !important; }
+}

@@ -79,6 +79,7 @@ func newTestManager(t *testing.T, actionImpl action.Action) (*Manager, *storage.
 func TestProcessDoesNotExtendRepeatedDetection(t *testing.T) {
 	blockAction := &testAction{}
 	manager, store := newTestManager(t, blockAction)
+	manager.SetRepeatRules(map[string]RepeatRule{"homepage": {Multiplier: 2, Maximum: 4 * time.Minute}})
 	ip := netip.MustParseAddr("192.0.2.10")
 	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
 	detection := engine.Detection{RuleID: "homepage", GroupField: engine.GroupByIP, GroupValue: ip.String()}
@@ -99,12 +100,69 @@ func TestProcessDoesNotExtendRepeatedDetection(t *testing.T) {
 	if !blockAction.apply[0].ExpiresAt.Equal(now.Add(time.Minute)) {
 		t.Fatalf("expiry changed: %s", blockAction.apply[0].ExpiresAt)
 	}
+	level, err := store.BlockStrike(context.Background(), "homepage", ip, now.Add(30*time.Second), 7*24*time.Hour)
+	if err != nil || level != 2 {
+		t.Fatalf("active repeat recorded another strike: level=%d err=%v", level, err)
+	}
 	leases, err := store.UnexpiredBlocks(context.Background(), now.Add(30*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(leases) != 1 || !leases[0].ExpiresAt.Equal(now.Add(time.Minute)) {
 		t.Fatalf("stored leases = %+v", leases)
+	}
+}
+
+func TestProcessUsesRuleDurationAndPermanentLease(t *testing.T) {
+	blockAction := &testAction{}
+	manager, _ := newTestManager(t, blockAction)
+	manager.SetRuleDurations(map[string]time.Duration{"short": 24 * time.Hour}, map[string]bool{"forever": true})
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	for _, detection := range []engine.Detection{
+		{RuleID: "short", GroupField: engine.GroupByIP, GroupValue: "192.0.2.10"},
+		{RuleID: "forever", GroupField: engine.GroupByIP, GroupValue: "192.0.2.11"},
+	} {
+		if _, err := manager.Process(context.Background(), detection, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !blockAction.apply[0].ExpiresAt.Equal(now.Add(24 * time.Hour)) {
+		t.Fatalf("short expiry = %s", blockAction.apply[0].ExpiresAt)
+	}
+	if got := blockAction.apply[1].ExpiresAt; got.Year() != 9999 {
+		t.Fatalf("permanent expiry = %s", got)
+	}
+}
+
+func TestProcessProgressiveDurationPersistsAndResets(t *testing.T) {
+	backend := &testAction{}
+	manager, store := newTestManager(t, backend)
+	manager.SetRepeatRules(map[string]RepeatRule{"homepage": {Multiplier: 2, Maximum: 4 * time.Minute}})
+	ip := "192.0.2.10"
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	detection := engine.Detection{RuleID: "homepage", GroupField: engine.GroupByIP, GroupValue: ip}
+	for _, offset := range []time.Duration{0, time.Minute, 3 * time.Minute} {
+		if _, err := manager.Process(context.Background(), detection, now.Add(offset)); err != nil {
+			t.Fatal(err)
+		}
+		if err := manager.Cleanup(context.Background(), now.Add(offset+time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := []time.Duration{backend.apply[0].ExpiresAt.Sub(now), backend.apply[1].ExpiresAt.Sub(now.Add(time.Minute)), backend.apply[2].ExpiresAt.Sub(now.Add(3 * time.Minute))}; got[0] != time.Minute || got[1] != 2*time.Minute || got[2] != 4*time.Minute {
+		t.Fatalf("durations = %v", got)
+	}
+	// A recreated manager must continue from SQLite, then the seven-day gap resets it.
+	recreated, err := New(manager.policy, time.Minute, backend, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recreated.SetRepeatRules(map[string]RepeatRule{"homepage": {Multiplier: 2, Maximum: 4 * time.Minute}})
+	if _, err := recreated.Process(context.Background(), detection, now.Add(8*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := backend.apply[len(backend.apply)-1].ExpiresAt.Sub(now.Add(8 * 24 * time.Hour)); got != time.Minute {
+		t.Fatalf("reset duration = %s", got)
 	}
 }
 

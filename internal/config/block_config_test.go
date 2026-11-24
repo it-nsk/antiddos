@@ -152,6 +152,20 @@ func TestDryRunAcceptsProspectiveRuleActions(t *testing.T) {
 	}
 }
 
+func TestRuleBlockDurationOverrideAndPermanentNFTables(t *testing.T) {
+	cfg, err := decode(strings.NewReader(`{"log_file":"/tmp/access.log","block_mode":"hybrid","engine":{"rules":[{"id":"short","action":"nftables","block_duration":"15m","path_regex":"^/$","window":"5s","threshold":1,"group_by":"ip"},{"id":"forever","action":"nftables","block_duration":"permanent","path_regex":"^/x$","window":"5s","threshold":1,"group_by":"ip"}]}}`), "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Engine.Rules[0].BlockDuration != 15*time.Minute || !cfg.Engine.Rules[1].BlockPermanent {
+		t.Fatalf("rule durations = %#v", cfg.Engine.Rules)
+	}
+	_, err = decode(strings.NewReader(`{"log_file":"/tmp/access.log","block_mode":"iptables","engine":{"rules":[{"id":"forever","block_duration":"permanent","path_regex":"^/$","window":"5s","threshold":1,"group_by":"ip"}]}}`), "test", "")
+	if err == nil {
+		t.Fatal("permanent iptables rule was accepted")
+	}
+}
+
 func TestLegacyEnforcementModesOverrideProspectiveRuleActions(t *testing.T) {
 	for _, mode := range []string{BlockModeNFTables, BlockModeSoftBlock} {
 		document := `{"log_sources":{"web":{"path":"/tmp/web.log","format":"nginx_custom","log_format":"$remote_addr [$time_local] \"$request\" $status $antiddos_response_origin"}},"block_mode":"` + mode + `","soft_block":{"cookie_ttl":"30m","sites":{"main":{"hosts":["example.test"],"log_sources":["web"]}}},"engine":{"rules":[{"id":"r","action":"dry_run","log_source":"web","path_regex":"^/$","window":"5s","threshold":5,"group_by":"ip"}]}}`

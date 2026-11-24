@@ -153,6 +153,14 @@ func (store *Store) createSchema(ctx context.Context) error {
 			expires_at_unix_ms INTEGER NOT NULL CHECK (expires_at_unix_ms > started_at_unix_ms),
 			origin TEXT NOT NULL DEFAULT 'detected' CHECK (origin IN ('detected','external'))
 		)`,
+		`CREATE TABLE IF NOT EXISTS block_escalations (
+			rule_id TEXT NOT NULL,
+			ip TEXT NOT NULL,
+			strikes INTEGER NOT NULL CHECK (strikes > 0),
+			last_blocked_at_unix_ms INTEGER NOT NULL,
+			PRIMARY KEY (rule_id, ip)
+		)`,
+		`CREATE INDEX IF NOT EXISTS block_escalations_last_blocked ON block_escalations(last_blocked_at_unix_ms)`,
 		`CREATE TABLE IF NOT EXISTS soft_block_decisions (
 			site_id TEXT NOT NULL,
 			rule_id TEXT NOT NULL,

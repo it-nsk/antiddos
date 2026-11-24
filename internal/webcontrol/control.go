@@ -156,7 +156,7 @@ func (s *Service) handler() http.Handler {
 			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid dashboard query"))
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		data, err := s.Stats.Dashboard(ctx, time.Unix(from, 0), time.Unix(to, 0), before, limit)
 		if err != nil {

@@ -59,5 +59,6 @@ async function main(){
  await waitFor(()=>existsSync(socket));await new Promise(r=>setTimeout(r,Number(process.env.ANTIDDOS_E2E_SEED_WAIT_MS??55000)));
  if(stopping)return;
  web=launch(['web','--users-db',users,'--daemon-socket',socket,'--listen',`127.0.0.1:${port}`,'--origin',`http://127.0.0.1:${port}`]);saveFixture();
+ console.log(`AntiDDoS test UI: http://127.0.0.1:${port}/ (admin / ${password})`);
 }
 main().catch(error=>{console.error(error);void stop(1)});

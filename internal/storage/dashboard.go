@@ -78,12 +78,40 @@ type SourceTraffic struct {
 // Dashboard returns a consistent, bounded snapshot. Traffic is aggregated across all sources.
 // Detections are events, not proof that an enforcement action was applied.
 func (r *Reader) Dashboard(ctx context.Context, from, to time.Time, before int64, limit int) (Dashboard, error) {
+	// Clamp broad UI requests to the period actually observed. Besides avoiding
+	// empty tails, this keeps historical dashboards bounded by real data.
+	var first, last sql.NullInt64
+	if err := r.db.QueryRowContext(ctx, `SELECT MIN(t),MAX(t) FROM (SELECT bucket_start_unix t FROM traffic_samples_by_source UNION ALL SELECT event_time_unix_ns / 1000000000 t FROM detections)`).Scan(&first, &last); err != nil {
+		return Dashboard{}, err
+	}
+	if first.Valid && last.Valid {
+		if from.Unix() < first.Int64 && to.Unix() > first.Int64 {
+			from = time.Unix(first.Int64, 0)
+		}
+	}
 	d := Dashboard{From: from.Unix(), To: to.Unix(), UpdatedAt: time.Now().Unix(), Points: []TrafficPoint{}, SourcePoints: []SourceTraffic{}, RulePoints: []RuleDetectionPoint{}, Detections: []DashboardDetection{}, Blocks: []DashboardBlock{}}
 	span := d.To - d.From
 	if d.From < 0 || span < 15 || limit < 1 || limit > 1000 || before < 0 {
 		return d, fmt.Errorf("range must be at least 15 seconds; limit 1–1000; cursor nonnegative")
 	}
-	step := ((span+599)/600 + 14) / 15 * 15
+	// Keep short periods at the native 15-second resolution, while retaining
+	// enough detail for historical investigation instead of forcing every long
+	// range into only 600 coarse buckets.
+	step := int64(15)
+	switch {
+	case span <= 6*60*60:
+		step = 15
+	case span <= 2*24*60*60:
+		step = 60
+	case span <= 14*24*60*60:
+		step = 5 * 60
+	case span <= 62*24*60*60:
+		step = 15 * 60
+	case span <= 180*24*60*60:
+		step = 60 * 60
+	default:
+		step = 6 * 60 * 60
+	}
 	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return d, err
