@@ -1,5 +1,4 @@
 function initLogs({sources: demoSources, frames}, records, detectionsRange) {
-  const clock = time => new Date(time).toISOString().slice(11, 19);
   function recentRecords(source, start, finish, limit) {
     return (records[source] ?? []).filter(row => row.time >= start && row.time < finish).sort((a,b)=>b.time-a.time).slice(0, limit);
   }
@@ -23,7 +22,7 @@ function initLogs({sources: demoSources, frames}, records, detectionsRange) {
         const index = demoSources.indexOf(name);
         return {name, index, color: palette[index < 0 ? 3 : index]};
       });
-      graph = createSeriesChart(get, lines, frames, range, 'Обращений', {rateUnit: 'зап/с'});
+      graph = createSeriesChart(get, lines, frames, range, 'Обращений', {rateUnit: 'зап/с', axisUnit: ''});
       traffic = createSeriesChart(key => get('traffic-' + key), lines,
         frames, range, 'Объём ответов', {field: 'responseSizes', rateUnit: 'Мб/с', factor: 8 / 1000000, totalUnit: 'Мб'});
     }
@@ -72,14 +71,14 @@ function initLogs({sources: demoSources, frames}, records, detectionsRange) {
       if (!source || document.getElementById('logs').hidden) return;
       const [start, finish] = range.current();
       const rows = recentRecords(source, start, finish, Number(get('page-size').value));
-      const headers = ['Время (UTC)', 'IP-адрес', 'Сообщение'];
+      const headers = ['Время (' + range.timeZone() + ')', 'IP-адрес', 'Сообщение'];
       if (liveTick === true && (get('list').querySelector('[aria-expanded="true"]') || get('list').contains(document.activeElement))) return;
       if (liveTick !== true) get('head').replaceChildren(...headers.map(text => element('th', 'text-nowrap', text)));
       const list = get('list');
       list.replaceChildren();
       for (const record of rows) {
         const row = list.insertRow();
-        row.insertCell().textContent = clock(record.time);
+        row.insertCell().textContent = range.format(record.time).slice(11, 19);
         const address = row.insertCell();
         address.className = 'text-nowrap';
         address.textContent = record.ip;

@@ -123,6 +123,17 @@
   border-left: 1px solid var(--bs-primary);
   border-right: 1px solid var(--bs-primary);
 }
+.series-chart-unit {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  /* Match the horizontal centre of the numeric Y-axis labels. */
+  left: .625rem;
+  color: var(--bs-secondary-color);
+  font-size: .75rem;
+  line-height: 1;
+  pointer-events: none;
+}
 .series-tooltip strong { display: block; margin-bottom: .25rem; }
 .series-reading:not([hidden]) {
   display: grid;

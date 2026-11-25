@@ -24,6 +24,11 @@ test('original LogBan layout, real data, navigation, theme and mobile',async({pa
  await page.locator('.log-disclosure').first().click();
  await expect(page.locator('.log-raw').first()).toBeVisible();
  await page.goto('/#dashboard');
+ await page.locator('#hit-range-toggle').click();
+ await page.locator('#hit-timezone').selectOption('Asia/Novosibirsk');
+ await page.locator('#hit-range-form button.btn-primary').click();
+ await expect(page.locator('#hit-range-label')).toContainText('UTC+7 · Новосибирск');
+ await expect(page.getByText(/Показаны первые .* срабатываний/)).toHaveCount(0);
  await page.screenshot({path:'../runtime/web-e2e/logban-dashboard.png',fullPage:true});
  await page.emulateMedia({colorScheme:'dark'});
  await expect(page.locator('html')).toHaveAttribute('data-bs-theme','dark');

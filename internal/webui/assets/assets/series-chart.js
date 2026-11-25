@@ -1,4 +1,4 @@
-function createSeriesChart(get, lines, frames, range, quantity, {rateUnit = '', field = 'counts', factor = 1, totalUnit = ''} = {}) {
+function createSeriesChart(get, lines, frames, range, quantity, {rateUnit = '', axisUnit = rateUnit, field = 'counts', factor = 1, totalUnit = ''} = {}) {
   const perSecond = Boolean(rateUnit);
   const minute = 60000, day = 1440 * minute;
   const rateFormat = new Intl.NumberFormat('ru-RU', {maximumSignificantDigits: 3});
@@ -24,7 +24,13 @@ function createSeriesChart(get, lines, frames, range, quantity, {rateUnit = '', 
     return {button, eye, count};
   });
   const host = get('chart');
-  const clock = time => new Date(time).toISOString().slice(11, 16);
+  if (axisUnit) {
+    const unit = document.createElement('span');
+    unit.className = 'series-chart-unit';
+    unit.textContent = axisUnit;
+    host.append(unit);
+  }
+  const clock = time => range.format(time).slice(11, 16);
   let chart;
   let selectionStart = null;
   let selectionCurrent = null;
@@ -52,11 +58,11 @@ function createSeriesChart(get, lines, frames, range, quantity, {rateUnit = '', 
     return {row, value};
   });
   host.append(tip);
-  const stamp = time => new Date(time).toISOString().slice(5, 16).replace('T', ' ');
+  const stamp = time => range.format(time).slice(5, 16);
   function renderAxis(start, finish) {
     get('axis').replaceChildren(...[start, (start + finish) / 2, finish].map(t => {
       const span = document.createElement('span');
-      span.textContent = (finish - start >= day ? new Date(t).toISOString().slice(5,10) + ' ' : '') + clock(t) + ' UTC';
+      span.textContent = (finish - start >= day ? range.format(t).slice(5,10) + ' ' : '') + clock(t) + ' ' + range.timeZone();
       return span;
     }));
   }
@@ -64,7 +70,7 @@ function createSeriesChart(get, lines, frames, range, quantity, {rateUnit = '', 
     const {idx, left, top} = plot.cursor;
     tip.hidden = idx == null || left < 0 || top < 0 || hidden.size === lines.length;
     if (tip.hidden) return;
-    heading.textContent = stamp(plot.data[0][idx]) + ' UTC';
+    heading.textContent = stamp(plot.data[0][idx]) + ' ' + range.timeZone();
     readings.forEach(({row, value}, i) => {
       row.hidden = hidden.has(lines[i]);
       const reading = plot.data[i + 1][idx];

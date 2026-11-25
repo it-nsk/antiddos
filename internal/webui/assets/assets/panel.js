@@ -35,7 +35,6 @@ async function loadPanel() {
         if(cursor === next.next_before) break;
         cursor = next.next_before;
       }
-      if(cursor) showBackendStatus('Показаны первые '+detections.length+' срабатываний. Сузьте период для полного журнала.');
       const byTime = new Map();
       for(const point of data.rule_points || []) {
         const i = names.indexOf(point.rule);

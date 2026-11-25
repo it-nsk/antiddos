@@ -5,7 +5,6 @@ function initSystem(host, detectionsRange) {
   const now = origin + (sampleCount - 1) * step;
   const number = new Intl.NumberFormat('ru-RU', {maximumFractionDigits: 1});
   const format = value => number.format(value);
-  const clock = ms => new Date(ms).toISOString().slice(5, 19).replace('T', ' ');
   const colors = ['#3975e5', '#39a47a'];
 
   function channel(label, key, capacity) {
@@ -45,8 +44,11 @@ function initSystem(host, detectionsRange) {
     const tip = node(plot, 'div', 'series-tooltip');
     tip.hidden = true;
     const stats = node(box, 'div', 'small text-body-secondary');
-    let chart;
-    return (start, finish) => {
+    let chart, selectedRange;
+    const clock = ms => selectedRange ? selectedRange.format(ms).slice(5, 19) : new Date(ms).toISOString().slice(5, 19).replace('T', ' ');
+    const zone = () => selectedRange?.timeZone() || 'UTC';
+    return (start, finish, range) => {
+      selectedRange = range;
       const first = Math.max(0, Math.ceil((start - origin) / step));
       const end = Math.min(sampleCount, Math.floor((finish - origin) / step) + 1);
       plot.hidden = first >= end;
@@ -83,13 +85,13 @@ function initSystem(host, detectionsRange) {
           legend: {show: false}, cursor: {y: false, drag: {x: false, y: false}},
           axes: [{show: full, size: 24, stroke: '#808080', grid: {show: false}, ticks: {show: false},
             splits: (_, axis, min, max) => [min + (max - min) / 6, (min + max) / 2, max - (max - min) / 6],
-            values: (_, ticks) => ticks.map(t => clock(t).slice(0,11) + ' UTC')},
+            values: (_, ticks) => ticks.map(t => clock(t).slice(0,11) + ' ' + zone())},
             {show: full, size: 42, stroke: '#808080', ticks: {show: false}, grid: {stroke: 'rgba(128,128,128,.20)'}}],
           series: [{}, ...metric.lines.map((line,i) => ({label: line.label, stroke: colors[i], fill: colors[i] + '20', width: 2, paths: uPlot.paths.spline(), points: {show: false}}))],
           hooks: {setCursor: [u => {
             const {idx,left,top} = u.cursor;
             tip.hidden = idx == null || left < 0 || top < 0;
-            if (!tip.hidden) tip.textContent = [clock(u.data[0][idx]) + ' UTC', ...metric.lines.map((l,i) => l.label + ' · ' + format(u.data[i + 1][idx]) + ' ' + metric.unit)].join('\n');
+            if (!tip.hidden) tip.textContent = [clock(u.data[0][idx]) + ' ' + zone(), ...metric.lines.map((l,i) => l.label + ' · ' + format(u.data[i + 1][idx]) + ' ' + metric.unit)].join('\n');
           }]}
         }, data, plot);
         new ResizeObserver(() => {
@@ -110,7 +112,7 @@ function initSystem(host, detectionsRange) {
     for (const view of views) {
       if (!view.section.getClientRects().length) continue;
       const bounds = view.range.current();
-      for (const update of view.cards) update(...bounds);
+      for (const update of view.cards) update(...bounds, view.range);
     }
   }
   for (const {section} of views) new ResizeObserver(render).observe(section);

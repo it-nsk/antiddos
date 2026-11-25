@@ -152,7 +152,7 @@
               </div></div>
               <div class="card mb-3"><div class="card-body row g-3">
                 <div class="col-lg-9">
-                  <h2 class="h5">Трафик <small class="text-body-secondary">Мб/с</small></h2>
+                  <h2 class="h5">Трафик</h2>
                   <div id="log-traffic-chart" role="img" style="height:12rem;overflow:hidden"></div>
                   <div id="log-traffic-axis" class="d-flex justify-content-between text-body-secondary small"></div>
                 </div>
@@ -187,7 +187,7 @@
           <div class="card">
             <div class="card-body col-lg-6"><label class="form-label" for="block-search">Поиск по IP</label><input type="search" class="form-control" id="block-search"></div>
             <div class="table-responsive"><table class="table align-middle mb-0">
-              <thead><tr><th>IP-адрес</th><th>Правило</th><th>Дата добавления (UTC)</th><th><span class="visually-hidden">Действия</span></th></tr></thead>
+              <thead><tr><th>IP-адрес</th><th>Правило</th><th id="block-started-header">Дата добавления</th><th id="block-expires-header">Дата снятия</th></tr></thead>
               <tbody id="block-list"></tbody>
             </table></div>
           </div>
@@ -341,7 +341,13 @@
           <label class="col-sm-6 small">Начало<input data-range-part="from" type="text" autocomplete="off" spellcheck="false" placeholder="ГГГГ-ММ-ДД ЧЧ:ММ" required class="form-control form-control-sm"></label>
           <label class="col-sm-6 small">Конец<input data-range-part="to" type="text" autocomplete="off" spellcheck="false" placeholder="ГГГГ-ММ-ДД ЧЧ:ММ" required class="form-control form-control-sm"></label>
         </div>
-        <div class="d-flex justify-content-between align-items-center mt-3"><span class="text-body-secondary small">Часовой пояс UTC</span><button class="btn btn-primary btn-sm">Применить</button></div>
+        <div class="d-flex justify-content-between align-items-end gap-2 mt-3 border-top pt-2">
+          <label class="small flex-grow-1 mb-0">Часовой пояс
+            <select data-range-part="timezone" class="form-select form-select-sm mt-1" aria-label="Часовой пояс"></select>
+          </label>
+          <button data-range-part="timezone-reset" type="button" class="btn btn-outline-secondary btn-sm">Сбросить</button>
+          <button class="btn btn-primary btn-sm">Применить</button>
+        </div>
       </form>
     </template>
     <div class="modal" id="block-modal" tabindex="-1" aria-labelledby="block-title" aria-hidden="true">

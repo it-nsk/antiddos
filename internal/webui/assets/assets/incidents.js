@@ -19,7 +19,7 @@ function initIncidents({snapshot, rules, frames}, incidents) {
     list.replaceChildren();
     for (const row of pager.rows(rows)) {
       const tr = list.insertRow();
-      const start = new Date(row.start).toLocaleString('ru-RU', {timeZone: 'UTC'});
+      const start = range.format(row.start).replace(' ', ', ') + ' ' + range.timeZone();
       const avg = row.blocked ? (row.delay / row.blocked / 1000).toLocaleString('ru-RU', {maximumFractionDigits: 2}) + ' с' : '—';
       for (const value of [start, row.rule.name, row.hits]) tr.insertCell().textContent = value;
       const detail = document.createElement('details');
