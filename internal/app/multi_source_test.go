@@ -137,6 +137,36 @@ func TestRunRoutesMultipleLogSourcesAndAppliesRuleWhitelist(t *testing.T) {
 	}
 }
 
+func TestRunCollectsTrafficFromSourceWithoutEnabledRules(t *testing.T) {
+	directory := t.TempDir()
+	logPath := filepath.Join(directory, "metrics-only.log")
+	databasePath := filepath.Join(directory, "state.sqlite")
+	stamp := time.Now().UTC()
+	if err := os.WriteFile(logPath, []byte(nginxLine(stamp, "192.0.2.55", "/existing-file")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(directory, "config.json")
+	configJSON := fmt.Sprintf(`{"log_sources":{"metrics":%q},"database_path":%q,"start_position":"end","block_mode":"dry_run","engine":{"rules":[{"id":"disabled","enabled":false,"log_source":"metrics","path_regex":"^/$","window":"1s","threshold":1,"group_by":"ip"}]}}`, logPath, databasePath)
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(context.Background(), RunOptions{Config: configPath, FromStart: true, Once: true}, slog.Default()); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := storage.OpenReader(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	traffic, err := reader.Traffic(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(traffic) == 0 || traffic[0].Requests != 1 || traffic[0].MatchedRequests != 0 {
+		t.Fatalf("traffic=%+v", traffic)
+	}
+}
+
 func waitMessage(t *testing.T, messages <-chan string, want string) {
 	t.Helper()
 	deadline := time.After(3 * time.Second)

@@ -88,14 +88,14 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 	}
 	var revisions []string
 	for _, source := range cfg.LogSources {
-		if len(rulesBySource[source.ID]) == 0 {
-			continue
-		}
 		sourceParser, err := parser.NewWithOriginRequirement(source.Format, source.LogFormat, config.UsesSoftBlock(cfg) && softSources[source.ID])
 		if err != nil {
 			return fmt.Errorf("initialize parser for log source %q: %w", source.ID, err)
 		}
 		parsersBySource[source.ID] = sourceParser
+		if len(rulesBySource[source.ID]) == 0 {
+			continue
+		}
 		ruleEngine, err := engine.NewWithOptions(rulesBySource[source.ID], engine.Options{
 			LiveClock: liveTail, IgnoreIPs: cfg.Engine.IgnoreIPs,
 		})
@@ -311,9 +311,6 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 	}
 	followers := make([]*reader.Follower, 0, len(cfg.LogSources))
 	for _, source := range cfg.LogSources {
-		if len(rulesBySource[source.ID]) == 0 {
-			continue
-		}
 		for _, physicalPath := range source.Paths {
 			follower, err := reader.Open(reader.Options{
 				Source: source.ID, Path: physicalPath,
@@ -418,6 +415,9 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 	}()
 
 	processEvent := func(ruleEngine *engine.Engine, event request.Event) (bool, error) {
+		if ruleEngine == nil {
+			return false, nil
+		}
 		if ruleEngine.IsIgnored(event) {
 			return ruleEngine.Matches(event), nil
 		}
