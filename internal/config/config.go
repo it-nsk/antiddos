@@ -125,8 +125,9 @@ type RuleConfig struct {
 }
 
 // EffectiveRuleAction returns the action the daemon applies for a rule in the
-// configured mode. Dry-run deliberately has no effective action even when a
-// prospective action is present in the rule.
+// configured mode. A rule action takes precedence over the legacy global
+// dry_run mode, so an action saved through the UI is not silently disabled by
+// an old block_mode setting. Rules without an explicit action remain dry-run.
 func EffectiveRuleAction(mode string, rule RuleConfig) string {
 	switch mode {
 	case BlockModeNFTables:
@@ -137,6 +138,11 @@ func EffectiveRuleAction(mode string, rule RuleConfig) string {
 		return RuleActionSoftBlock
 	case BlockModeHybrid:
 		return rule.Action
+	case BlockModeDryRun:
+		if rule.Action != "" {
+			return rule.Action
+		}
+		return RuleActionDryRun
 	default:
 		return ""
 	}

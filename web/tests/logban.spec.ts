@@ -38,6 +38,7 @@ test('rule edits persist on backend and after reload; server validation stays vi
  await page.locator('#rule-path').fill('^/persisted$');
  await page.locator('#rule-save').click();
  await expect(page.locator('#rule-modal')).not.toBeVisible();
+ await expect(page.locator('#backend-status')).toContainText('sudo systemctl restart antiddos');
  let config=await (await page.request.get('/api/config')).json();
  expect(config.config.rules.find((r:any)=>r.id==='homepage').path_regex).toBe('^/persisted$');
  await page.reload();

@@ -150,6 +150,12 @@ func TestDryRunAcceptsProspectiveRuleActions(t *testing.T) {
 	if cfg.Engine.Rules[0].Action != RuleActionSoftBlock || cfg.Engine.Rules[1].Action != RuleActionNFTables {
 		t.Fatalf("dry-run actions = %q, %q", cfg.Engine.Rules[0].Action, cfg.Engine.Rules[1].Action)
 	}
+	if got := EffectiveRuleAction(cfg.BlockMode, cfg.Engine.Rules[0]); got != RuleActionSoftBlock {
+		t.Fatalf("dry_run must not override rule action: got %q", got)
+	}
+	if got := EffectiveRuleAction(cfg.BlockMode, cfg.Engine.Rules[1]); got != RuleActionNFTables {
+		t.Fatalf("dry_run must not override rule action: got %q", got)
+	}
 }
 
 func TestRuleBlockDurationOverrideAndPermanentNFTables(t *testing.T) {

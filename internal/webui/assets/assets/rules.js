@@ -1,6 +1,17 @@
 function initRules(samples, sourceList) {
   const get = id => document.getElementById('rule-' + id);
   const form = get('form');
+  // Validation is performed explicitly in the submit handler so an invalid
+  // hidden control can never make the Save button appear to do nothing.
+  form.noValidate = true;
+  const saveButton = get('save');
+  // Bootstrap's modal can retain native constraint-validation state for a
+  // hidden field. Submit explicitly so clicking Save always reaches our
+  // validation and API error handling instead of failing silently.
+  saveButton.type = 'button';
+  saveButton.addEventListener('click', () => {
+    form.dispatchEvent(new Event('submit', {cancelable: true}));
+  });
   const modal = bootstrap.Modal.getOrCreateInstance(get('modal'));
   const pager = createTablePager(get, render);
   const defaults = {
@@ -253,8 +264,14 @@ function initRules(samples, sourceList) {
   form.addEventListener('submit', async event => {
     event.preventDefault();
     if (!editable) return;
+    const save = saveButton;
+    if (save.disabled) return;
     const rule = {...original};
-    for (const field of Object.keys(defaults)) rule[field] = get(field).value.trim();
+    for (const field of Object.keys(defaults)) {
+      // These fields are represented by separate controls and are copied below.
+      if (['enabled', 'blockDuration', 'captchaTTL', 'repeatBlockMultiplier', 'repeatBlockMaxDuration'].includes(field)) continue;
+      rule[field] = get(field).value.trim();
+    }
     rule.blockDuration = get('block-duration').value === 'custom' ? get('block-duration-custom').value.trim() : get('block-duration').value;
     rule.repeatBlockMultiplier = get('repeat-enabled').checked ? Number(get('repeat-multiplier').value) : 1;
     rule.repeatBlockMaxDuration = get('repeat-max-duration').value === 'custom' ? get('repeat-max-custom').value.trim() : get('repeat-max-duration').value;
@@ -279,7 +296,18 @@ function initRules(samples, sourceList) {
     if (!/^(?:(?:\d+(?:\.\d+)?|\.\d+)(?:ns|us|µs|ms|s|m|h))+$/.test(rule.window) || !/[1-9]/.test(rule.window)) {
       get('window').setCustomValidity('Укажите положительный интервал, например 10s или 1m30s.');
     }
-    if (!form.reportValidity() || !(await commit(original, rule))) return;
+    if (!form.checkValidity()) {
+      const invalid = Array.from(form.elements).find(element => !element.validity?.valid);
+      const feedback = get('error');
+      feedback.textContent = invalid?.validationMessage || 'Проверьте заполнение полей правила.';
+      feedback.hidden = false;
+      invalid?.focus();
+      return;
+    }
+    save.disabled = true;
+    const saved = await commit(original, rule);
+    save.disabled = false;
+    if (!saved) return;
     returnFocus = rule.id;
     modal.hide();
     // Keep the modal state deterministic when a save finishes during the

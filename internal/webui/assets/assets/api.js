@@ -8,7 +8,7 @@ function showBackendStatus(message) {
 function showRestartCommand() {
   const node = document.getElementById('backend-status');
   if (!node) return;
-  node.replaceChildren('Настройки сохранены. Выполните на сервере: ');
+  node.replaceChildren('Настройки сохранены. Для применения выполните на сервере: ');
   const command = document.createElement('code');
   command.textContent = 'sudo systemctl restart antiddos';
   node.append(command);

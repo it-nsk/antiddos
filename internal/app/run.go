@@ -465,9 +465,9 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 				if err != nil {
 					logger.Error("persist soft-block decision", "rule", detection.RuleID, "error", err)
 				}
-			} else if actionName == config.RuleActionNFTables || actionName == config.RuleActionIPTables || actionName == config.RuleActionCustom || cfg.BlockMode == config.BlockModeDryRun {
+			} else if actionName == config.RuleActionNFTables || actionName == config.RuleActionIPTables || actionName == config.RuleActionCustom {
 				result, err := manager.Process(ctx, *evaluation.Detection, time.Now())
-				logBlockResult(logger, result, cfg.BlockMode == config.BlockModeDryRun)
+				logBlockResult(logger, result, false)
 				if err != nil {
 					logger.Error("persist active block", "ip", result.IP, "error", err)
 				}
