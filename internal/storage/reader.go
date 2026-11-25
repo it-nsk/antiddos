@@ -171,6 +171,30 @@ func (r *Reader) HistoricalDetectionsRange(ctx context.Context, importID string,
 	return result, rows.Err()
 }
 
+// HistoricalDetectionsForImport returns the complete, provenance-scoped result
+// of one historical import for an explicitly confirmed enforcement replay.
+func (store *Store) HistoricalDetectionsForImport(ctx context.Context, importID string) ([]HistoricalDetection, error) {
+	if importID == "" {
+		return nil, fmt.Errorf("import ID is required")
+	}
+	rows, err := store.db.QueryContext(ctx, `SELECT d.id,d.log_source,d.event_time_unix_ns,d.event_time_text,d.rule_id,d.grouping_id,d.group_values_json,d.trigger_ip,d.trigger_user_agent,d.request_count,d.window_millis,d.threshold FROM detections d JOIN history_detection_provenance p ON p.detection_id=d.id WHERE p.import_id=? ORDER BY d.event_time_unix_ns,d.id`, importID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []HistoricalDetection{}
+	for rows.Next() {
+		var item HistoricalDetection
+		var eventNS int64
+		if err := rows.Scan(&item.ID, &item.LogSource, &eventNS, &item.EventTimeText, &item.RuleID, &item.GroupingID, &item.GroupValuesJSON, &item.TriggerIP, &item.TriggerUserAgent, &item.RequestCount, &item.WindowMillis, &item.Threshold); err != nil {
+			return nil, err
+		}
+		item.EventTime = time.Unix(0, eventNS)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 func (r *Reader) Traffic(ctx context.Context, limit int) ([]metrics.Sample, error) {
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("limit must be between 1 and 1000")

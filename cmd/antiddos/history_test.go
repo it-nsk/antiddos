@@ -95,6 +95,16 @@ func TestHistoryRunUsesConfiguredRulesAndRecordsBackdatedDetections(t *testing.T
 	}
 }
 
+func TestHistoryRunRequiresTwoExplicitArchiveEnforcementFlags(t *testing.T) {
+	for _, args := range [][]string{{"history", "run", "--apply-blocks"}, {"history", "run", "--confirm-archive-blocks"}} {
+		var output bytes.Buffer
+		err := executeCommand(context.Background(), args, slog.Default(), &output)
+		if err == nil || !strings.Contains(err.Error(), "requires both") {
+			t.Fatalf("args %v error=%v", args, err)
+		}
+	}
+}
+
 func gzipBytes(t *testing.T, value string) []byte {
 	t.Helper()
 	var result bytes.Buffer

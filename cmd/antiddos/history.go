@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/it-nsk/antiddos/internal/action"
 	"github.com/it-nsk/antiddos/internal/config"
 	"github.com/it-nsk/antiddos/internal/history"
 	"github.com/it-nsk/antiddos/internal/parser"
@@ -42,7 +44,7 @@ database or invokes blocking actions.
 Run snapshots the source parser and enabled rules from the normal config,
 analyzes all matching archives in event-time order, and atomically appends the
 backdated traffic and dry-run detections to the configured database. It never
-invokes blocking, soft-block, or notification actions.
+invokes blocking unless both --apply-blocks and --confirm-archive-blocks are set.
 `
 
 func historyCommand(ctx context.Context, args []string, out io.Writer) error {
@@ -83,6 +85,7 @@ func historyCommand(ctx context.Context, args []string, out io.Writer) error {
 func historyRunCommand(ctx context.Context, args []string, out io.Writer) error {
 	var configFile, sourceID, directory, nameRegex, resultPath, order, timezone, workDirectory, fromText, toText string
 	var syslogYear, maxFiles, maxLineBytes int
+	var applyBlocks, confirmArchiveBlocks bool
 	var maxInputBytes, maxExpandedBytes, sortMemoryBytes, maxSortBytes, allowMalformed int64
 	f := flag.NewFlagSet("history run", flag.ContinueOnError)
 	f.SetOutput(out)
@@ -104,11 +107,16 @@ func historyRunCommand(ctx context.Context, args []string, out io.Writer) error 
 	f.Int64Var(&allowMalformed, "allow-malformed", 0, "explicit maximum malformed lines which may be skipped")
 	f.StringVar(&fromText, "from", "", "optional period start, inclusive (RFC3339; requires --to)")
 	f.StringVar(&toText, "to", "", "optional period end, exclusive (RFC3339; requires --from)")
+	f.BoolVar(&applyBlocks, "apply-blocks", false, "apply firewall blocks from historical detections (requires --confirm-archive-blocks)")
+	f.BoolVar(&confirmArchiveBlocks, "confirm-archive-blocks", false, "confirm that historical detections must block from now")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
 	if f.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %v", f.Args())
+	}
+	if applyBlocks != confirmArchiveBlocks {
+		return fmt.Errorf("historical enforcement requires both --apply-blocks and --confirm-archive-blocks")
 	}
 	from, to, err := parseHistoryPeriod(fromText, toText)
 	if err != nil {
@@ -175,6 +183,13 @@ func historyRunCommand(ctx context.Context, args []string, out io.Writer) error 
 		fmt.Fprintf(out, "Isolated result retained for review/retry: %s (import %s)\n", result.OutputPath, result.ImportID)
 		return fmt.Errorf("publish historical analysis: %w", err)
 	}
+	if applyBlocks {
+		count, err := applyHistoricalBlocks(ctx, cfg, result.ImportID)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "Historical enforcement applied: %d new firewall blocks; durations start now.\n", count)
+	}
 	if !keepResult {
 		removeHistoryResultFiles(result.OutputPath)
 	}
@@ -207,6 +222,77 @@ func reserveHistoryResultPath(directory string) (string, error) {
 		return "", fmt.Errorf("prepare history result path: %w", err)
 	}
 	return path, nil
+}
+
+func applyHistoricalBlocks(ctx context.Context, cfg config.Config, importID string) (int, error) {
+	store, err := storage.Open(cfg.DatabasePath)
+	if err != nil {
+		return 0, err
+	}
+	defer store.Close()
+	detections, err := store.HistoricalDetectionsForImport(ctx, importID)
+	if err != nil {
+		return 0, fmt.Errorf("read historical detections: %w", err)
+	}
+	rules := make(map[string]config.RuleConfig, len(cfg.Engine.Rules))
+	for _, rule := range cfg.Engine.Rules {
+		rules[rule.ID] = rule
+	}
+	nft := &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}
+	ipt := &action.IPTables{BlockTCPPorts: cfg.BlockTCPPorts}
+	now := time.Now()
+	applied := 0
+	for _, detection := range detections {
+		rule, ok := rules[detection.RuleID]
+		if !ok || rule.GroupBy != "ip" {
+			continue
+		}
+		mode := config.EffectiveRuleAction(cfg.BlockMode, rule)
+		var backend action.Action
+		switch mode {
+		case config.RuleActionNFTables:
+			backend = nft
+		case config.RuleActionIPTables:
+			backend = ipt
+		default:
+			continue
+		}
+		ip, err := netip.ParseAddr(detection.TriggerIP)
+		if err != nil {
+			continue
+		}
+		ip = ip.Unmap()
+		if ignoredHistoricalIP(cfg, rule, ip) {
+			continue
+		}
+		duration := cfg.BlockDuration
+		if rule.BlockDuration != 0 {
+			duration = rule.BlockDuration
+		}
+		expires := now.Add(duration)
+		if rule.BlockPermanent {
+			expires = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+		}
+		result := backend.Apply(ctx, action.BlockRequest{IP: ip, RuleID: rule.ID, ExpiresAt: expires})
+		if result.Status == action.StatusApplied {
+			if err := store.RecordBlock(ctx, ip, rule.ID, now, expires); err != nil {
+				return applied, err
+			}
+			applied++
+		} else if result.Status != action.StatusAlreadyActive {
+			return applied, fmt.Errorf("apply historical block %s for rule %s: %v", ip, rule.ID, result.Err)
+		}
+	}
+	return applied, nil
+}
+
+func ignoredHistoricalIP(cfg config.Config, rule config.RuleConfig, ip netip.Addr) bool {
+	for _, value := range append(append([]string{}, cfg.Engine.IgnoreIPs...), rule.IgnoreIPs...) {
+		if candidate, err := netip.ParseAddr(value); err == nil && candidate.Unmap() == ip {
+			return true
+		}
+	}
+	return false
 }
 
 func removeHistoryResultFiles(path string) {
