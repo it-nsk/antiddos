@@ -218,6 +218,54 @@ function defaultRuleForSource(source: LogSource): Rule {
     threshold: 10,
   };
 }
+
+function CaptchaRuleHelp() {
+  return (
+    <div className="notice subtle rule-action-help" role="note">
+      <strong>Чтобы CAPTCHA реально выдавалась:</strong> на сервере должен быть
+      установлен checker, а выбранный сайт подключён к Nginx через
+      <code>auth_request</code>. После сохранения настройки выполните:
+      <ol>
+        <li value={0}>
+          Найдите ID сайта в <code>/etc/antiddos/config.json</code>, в разделе{" "}
+          <code>soft_block.sites</code>. В интерфейсе это блок{" "}
+          <strong>Soft-block</strong> на странице правил. Например:
+          <pre className="mt-2 mb-0"><code>{'"soft_block": {
+  "sites": {
+    "site": { "hosts": ["example.com"], "log_sources": ["web"] }
+  }
+}'}</code></pre>
+          Здесь ID сайта — <code>site</code>.
+        </li>
+        <li>
+          <code>sudo /usr/local/bin/antiddos nginx-snippet --config /etc/antiddos/config.json --site &lt;site_id&gt; --output /etc/nginx/snippets/antiddos-&lt;site_id&gt; --write</code>
+        </li>
+        <li>
+          Откройте{" "}
+          <code>/etc/nginx/snippets/antiddos-&lt;site_id&gt;/README.txt</code> и
+          подключите указанные там include в Nginx; затем добавьте worker Nginx
+          в группу <code>antiddos-check</code>.
+        </li>
+        <li>
+          <code>sudo nginx -t &amp;&amp; sudo systemctl restart nginx antiddos antiddos-challenge</code>
+        </li>
+      </ol>
+      <span>
+        Замените <code>&lt;site_id&gt;</code> на ID сайта из блока Soft-block.
+        Проверка:{" "}
+        <code>sudo /usr/local/bin/antiddos soft-block doctor --config /etc/antiddos/config.json --site &lt;site_id&gt;</code>.{" "}
+        <a
+          href="https://github.com/it-nsk/antiddos#soft-block-captcha-setup"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Документация
+        </a>
+        .
+      </span>
+    </div>
+  );
+}
 function App() {
   const [session, setSession] = useState<Session | null>(null),
     [checking, setChecking] = useState(true),
@@ -2924,6 +2972,10 @@ function Whitelist({
                       ? "Определяется отдельно для нового правила."
                       : "Определяется глобальным режимом."}
                   </p>
+                  {((blockMode === "hybrid" && draft.action === "soft_block") ||
+                    blockMode === "soft_block") && (
+                    <CaptchaRuleHelp />
+                  )}
                 </label>
                 <div className="wizard-actions">
                   <button
@@ -3262,6 +3314,7 @@ function Whitelist({
                               ? "Определяется отдельно для этого правила."
                               : "Определяется глобальным режимом."}
                           </p>
+                          {effectiveAction(r) === "soft_block" && <CaptchaRuleHelp />}
                         </label>
                       </div>
                     </section>

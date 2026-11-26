@@ -529,6 +529,32 @@
                   <option value="24h">1 день</option>
                 </select>
                 <p class="form-text mb-0">TTL общий для всех правил CAPTCHA этого soft-block-сайта.</p>
+                <div class="alert alert-info text-body mt-3 mb-0 small">
+                  <strong>Что выполнить на сервере, чтобы CAPTCHA заработала:</strong>
+                  <ol class="mb-2 mt-2 ps-3">
+                    <li value="0">
+                      Найдите ID сайта в <code>/etc/antiddos/config.json</code>, в
+                      разделе <code>soft_block.sites</code>. В интерфейсе это
+                      блок <strong>Soft-block</strong> на странице правил. Например:
+                      <pre class="mb-0 mt-2"><code>&quot;soft_block&quot;: {
+  &quot;sites&quot;: {
+    &quot;site&quot;: { &quot;hosts&quot;: [&quot;example.com&quot;], &quot;log_sources&quot;: [&quot;web&quot;] }
+  }
+}</code></pre>
+                      Здесь ID сайта — <code>site</code>.
+                    </li>
+                    <li>
+                      <code>sudo /usr/local/bin/antiddos nginx-snippet --config /etc/antiddos/config.json --site &lt;site_id&gt; --output /etc/nginx/snippets/antiddos-&lt;site_id&gt; --write</code>
+                    </li>
+                    <li>Откройте <code>/etc/nginx/snippets/antiddos-&lt;site_id&gt;/README.txt</code> и подключите указанные там include в Nginx; затем добавьте worker Nginx в группу <code>antiddos-check</code>.</li>
+                    <li>
+                      <code>sudo nginx -t &amp;&amp; sudo systemctl restart nginx antiddos antiddos-challenge</code>
+                    </li>
+                  </ol>
+                  Проверить подключение:
+                  <code>sudo /usr/local/bin/antiddos soft-block doctor --config /etc/antiddos/config.json --site &lt;site_id&gt;</code>.
+                  <a href="https://github.com/it-nsk/antiddos#soft-block-captcha-setup" target="_blank" rel="noreferrer">Документация</a>.
+                </div>
               </div>
             </div>
             <div class="alert alert-danger mt-3 mb-0" id="rule-error" role="alert" hidden></div>
