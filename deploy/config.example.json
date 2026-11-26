@@ -1,19 +1,46 @@
 {
-  "log_file": "/var/log/nginx/access.log",
   "database_path": "/var/lib/antiddos/antiddos.sqlite",
   "start_position": "end",
-  "block_mode": "hybrid",
+  "block_mode": "dry_run",
   "block_duration": "5m",
-  "block_tcp_ports": [80, 443],
+  "log_sources": {
+    "web_access": {"path": "/var/log/nginx/access.log", "format": "nginx_combined"}
+  },
   "engine": {
     "ignore_ips": [],
     "rules": [
       {
-        "id": "homepage",
+        "id": "web-sensitive",
+        "enabled": false,
+        "type": "signature",
         "action": "dry_run",
+        "log_source": "web_access",
+        "path_regex": "(?i)(?:^|/)(?:\\.env(?:[/._-]|$)|\\.git(?:/|$)|\\.aws(?:/|$)|proc/self|etc/passwd)",
+        "window": "1s",
+        "threshold": 1,
+        "group_by": "ip"
+      },
+      {
+        "id": "web-home-burst",
+        "enabled": false,
+        "type": "rate",
+        "action": "dry_run",
+        "log_source": "web_access",
         "path_regex": "^/$",
         "window": "5s",
-        "threshold": 5,
+        "threshold": 10,
+        "group_by": "ip"
+      },
+      {
+        "id": "web-sqli-query",
+        "enabled": false,
+        "type": "signature",
+        "action": "dry_run",
+        "log_source": "web_access",
+        "path_regex": ".*",
+        "query_regex": "(?i)(?:union(?:%20|\\+|\\s)+select|or(?:%20|\\+|\\s)+1=1|sleep\\(|benchmark\\()",
+        "window": "1s",
+        "threshold": 1,
         "group_by": "ip"
       }
     ]

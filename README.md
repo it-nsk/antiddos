@@ -229,12 +229,13 @@ AntiDDoS не обрабатывает только `GET /`. Каждый parser
 | `Failed password for invalid user admin from 203.0.113.7 ...` | IP `203.0.113.7`, path `/ssh/invalid-user` | `ssh-invalid-user`: 3 события за минуту -- разведка имён SSH-аккаунтов. |
 | `SRC=203.0.113.7 PROTO=TCP DPT=3306` в UFW/kernel log | IP `203.0.113.7`, path `/port/tcp/3306`, port `3306` | `port-scan`: 8 **разных** портов за 30 секунд -- network service discovery (T1046). |
 
-Базовый установочный `config.example.json` оставлен минимальным и совместимым с
-`--log-file`: один access log, правило главной страницы в `dry_run`. Полный
-`config.security.example.json` содержит также Nginx error, SSH и port-scan
-пресеты. В нём нет включённой реакции: все правила имеют `action: dry_run`;
-шумные SSH, UFW, unique URL и homepage правила выключены до калибровки. Их
-можно включить галкой в UI или полем `enabled: true` в JSON.
+Базовый установочный `config.example.json` сразу содержит один именованный
+источник Nginx access log и три web-пресета: `web-sensitive`, `web-home-burst` и
+`web-sqli-query`. Все они выключены (`enabled: false`) и работают в безопасном
+режиме `dry_run`. После установки администратор может указать фактический путь и
+формат источника, включить нужные правила и изменить их параметры в UI.
+Дополнительный `config.security.example.json` содержит расширенный набор
+источников и правил для ручной настройки.
 
 ### Примеры режимов конфигурации
 
