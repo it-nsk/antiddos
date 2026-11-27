@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -31,31 +32,32 @@ import (
 const importAlgorithmVersion = "history-import-v4-response-time-published"
 
 type ImportOptions struct {
-	Config             config.Config
-	SourceID           string
-	Directory          string
-	AllowedRoots       []string
-	NameRegex          string
-	OutputPath         string
-	Order              string
-	FilenameTimeRegex  string
-	FilenameTimeLayout string
-	Location           *time.Location
-	SyslogYear         int
-	MaxFiles           int
-	MaxInputBytes      int64
-	MaxExpandedBytes   int64
-	MaxLineBytes       int
-	SortMemoryBytes    int64
-	MaxSortBytes       int64
-	PreflightBytes     int64
-	TempDirectory      string
-	AllowMalformed     int64
-	From               time.Time
-	To                 time.Time
-	Progress           func(ImportProgress)
-	ComparisonRule     string
-	ParentImportID     string
+	Config              config.Config
+	SourceID            string
+	Directory           string
+	AllowedRoots        []string
+	NameRegex           string
+	OutputPath          string
+	Order               string
+	FilenameTimeRegex   string
+	FilenameTimeLayout  string
+	Location            *time.Location
+	SyslogYear          int
+	MaxFiles            int
+	MaxInputBytes       int64
+	MaxExpandedBytes    int64
+	MaxLineBytes        int
+	SortMemoryBytes     int64
+	MaxSortBytes        int64
+	PreflightBytes      int64
+	TempDirectory       string
+	AllowMalformed      int64
+	From                time.Time
+	To                  time.Time
+	Progress            func(ImportProgress)
+	ComparisonRule      string
+	ParentImportID      string
+	CurrentSnapshotPath string
 }
 
 type ImportProgress struct {
@@ -173,9 +175,38 @@ func Import(ctx context.Context, options ImportOptions) (ImportResult, error) {
 		Order: options.Order, FilenameTimeRegex: options.FilenameTimeRegex, FilenameTimeLayout: options.FilenameTimeLayout, Location: options.Location, SyslogYear: options.SyslogYear, MaxFiles: options.MaxFiles,
 		MaxInputBytes: options.MaxInputBytes, MaxExpandedBytes: options.MaxExpandedBytes, MaxLineBytes: options.MaxLineBytes,
 	}
+	var live candidate
+	var liveSnapshot *os.File
+	if options.CurrentSnapshotPath != "" {
+		live, err = openLiveSnapshot(options.CurrentSnapshotPath)
+		if err != nil {
+			return ImportResult{}, err
+		}
+		liveSnapshot = live.liveSnapshot
+		defer liveSnapshot.Close()
+	}
 	files, _, err := discover(previewOptions)
 	if err != nil {
-		return ImportResult{}, err
+		if liveSnapshot == nil || !strings.Contains(err.Error(), "no regular files matched the filename regex") {
+			return ImportResult{}, err
+		}
+		files = nil
+	}
+	if liveSnapshot != nil {
+		if len(files) >= options.MaxFiles {
+			return ImportResult{}, fmt.Errorf("current log snapshot exceeds file limit of %d", options.MaxFiles)
+		}
+		var discoveredBytes int64
+		for _, file := range files {
+			if os.SameFile(file.info, live.info) {
+				return ImportResult{}, fmt.Errorf("current log %q is already matched by --name-regex; exclude it when using --snapshot-current", live.path)
+			}
+			discoveredBytes += file.size
+		}
+		if live.size > options.MaxInputBytes-discoveredBytes {
+			return ImportResult{}, fmt.Errorf("current log snapshot exceeds input size limit of %d bytes", options.MaxInputBytes)
+		}
+		files = append(files, live)
 	}
 	// Size the preflight to this archive. MaxSortBytes remains the hard cap
 	// enforced while writing chunks, rather than a fixed space requirement.
@@ -393,6 +424,35 @@ func validateImportOptions(options ImportOptions) error {
 	})
 }
 
+// openLiveSnapshot pins the active log inode and its byte boundary.  The
+// importer streams that descriptor directly, so no second full-size copy is
+// written and appends after this point cannot enter the historical run.
+func openLiveSnapshot(path string) (candidate, error) {
+	if !filepath.IsAbs(path) {
+		return candidate{}, fmt.Errorf("current log path must be absolute")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return candidate{}, fmt.Errorf("stat current log %q: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return candidate{}, fmt.Errorf("current log %q must be a regular non-symlink file", path)
+	}
+	if strings.HasSuffix(strings.ToLower(path), ".gz") {
+		return candidate{}, fmt.Errorf("current log snapshot does not support gzip files")
+	}
+	opened, err := os.Open(path)
+	if err != nil {
+		return candidate{}, fmt.Errorf("open current log %q: %w", path, err)
+	}
+	openedInfo, err := opened.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		opened.Close()
+		return candidate{}, fmt.Errorf("current log %q changed while opening", path)
+	}
+	return candidate{path: path, name: filepath.Base(path), size: openedInfo.Size(), info: openedInfo, liveSnapshot: opened}, nil
+}
+
 func maximumRuleWindow(rules []engine.Rule) time.Duration {
 	var maximum time.Duration
 	for _, rule := range rules {
@@ -481,17 +541,29 @@ func buildSortChunks(ctx context.Context, files []candidate, logParser parser.Pa
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
-		opened, err := os.Open(file.path)
-		if err != nil {
-			return nil, nil, fmt.Errorf("open %q: %w", file.path, err)
+		var err error
+		opened := file.liveSnapshot
+		if opened == nil {
+			opened, err = os.Open(file.path)
+			if err != nil {
+				return nil, nil, fmt.Errorf("open %q: %w", file.path, err)
+			}
 		}
 		openedInfo, err := opened.Stat()
-		if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(file.info, openedInfo) || openedInfo.Size() != file.size || !openedInfo.ModTime().Equal(file.info.ModTime()) {
-			opened.Close()
+		if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(file.info, openedInfo) || (file.liveSnapshot == nil && (openedInfo.Size() != file.size || !openedInfo.ModTime().Equal(file.info.ModTime()))) || (file.liveSnapshot != nil && openedInfo.Size() < file.size) {
 			return nil, nil, fmt.Errorf("file %q changed after discovery", file.path)
 		}
+		if file.liveSnapshot != nil {
+			if _, err := opened.Seek(0, io.SeekStart); err != nil {
+				return nil, nil, fmt.Errorf("rewind current log snapshot %q: %w", file.path, err)
+			}
+		}
 		hasher := sha256.New()
-		physical := io.TeeReader(opened, hasher)
+		var raw io.Reader = opened
+		if file.liveSnapshot != nil {
+			raw = io.LimitReader(opened, file.size)
+		}
+		physical := io.TeeReader(raw, hasher)
 		var source io.Reader = physical
 		var gzipReader *gzip.Reader
 		if file.compressed {
@@ -524,7 +596,6 @@ func buildSortChunks(ctx context.Context, files []candidate, logParser parser.Pa
 				} else {
 					result.Malformed++
 					if result.Malformed > options.AllowMalformed {
-						opened.Close()
 						return nil, nil, fmt.Errorf("malformed line allowance exceeded at %s:%d (%d > %d)", file.path, lineNumber, result.Malformed, options.AllowMalformed)
 					}
 				}
@@ -543,7 +614,6 @@ func buildSortChunks(ctx context.Context, files []candidate, logParser parser.Pa
 			}
 			if memoryBytes >= options.SortMemoryBytes {
 				if err := flush(); err != nil {
-					opened.Close()
 					return nil, nil, err
 				}
 			}
@@ -551,30 +621,29 @@ func buildSortChunks(ctx context.Context, files []candidate, logParser parser.Pa
 		expanded := remainingExpanded + 1 - limited.N
 		remainingExpanded -= min(expanded, remainingExpanded)
 		if limited.N <= 0 {
-			opened.Close()
 			return nil, nil, fmt.Errorf("expanded data exceeds limit of %d bytes", preview.MaxExpandedBytes)
 		}
 		if err := scanner.Err(); err != nil {
-			opened.Close()
 			return nil, nil, fmt.Errorf("read %q: %w", file.path, err)
 		}
 		if gzipReader != nil {
 			if err := gzipReader.Close(); err != nil {
-				opened.Close()
 				return nil, nil, fmt.Errorf("close gzip %q: %w", file.path, err)
 			}
 		}
-		if _, err := io.Copy(io.Discard, physical); err != nil {
-			opened.Close()
-			return nil, nil, fmt.Errorf("fingerprint %q: %w", file.path, err)
+		if file.liveSnapshot == nil {
+			if _, err := io.Copy(io.Discard, physical); err != nil {
+				return nil, nil, fmt.Errorf("fingerprint %q: %w", file.path, err)
+			}
 		}
 		finalInfo, err := opened.Stat()
-		if err != nil || finalInfo.Size() != openedInfo.Size() || !finalInfo.ModTime().Equal(openedInfo.ModTime()) {
-			opened.Close()
+		if err != nil || (file.liveSnapshot == nil && (finalInfo.Size() != openedInfo.Size() || !finalInfo.ModTime().Equal(openedInfo.ModTime()))) || (file.liveSnapshot != nil && finalInfo.Size() < file.size) {
 			return nil, nil, fmt.Errorf("file %q changed while it was being read", file.path)
 		}
-		if err := opened.Close(); err != nil {
-			return nil, nil, fmt.Errorf("close %q: %w", file.path, err)
+		if file.liveSnapshot == nil {
+			if err := opened.Close(); err != nil {
+				return nil, nil, fmt.Errorf("close %q: %w", file.path, err)
+			}
 		}
 		manifests = append(manifests, manifestFile{Path: file.path, Size: file.size, SHA256: hex.EncodeToString(hasher.Sum(nil))})
 		if options.Progress != nil {

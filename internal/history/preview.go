@@ -85,6 +85,7 @@ type candidate struct {
 	rotation     int
 	hasRotate    bool
 	filenameTime time.Time
+	liveSnapshot *os.File
 }
 
 var unsupportedArchiveRE = regexp.MustCompile(`(?i)\.(?:zip|bz2|xz|zst|7z|rar)$`)

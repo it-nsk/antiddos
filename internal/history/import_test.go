@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,6 +87,39 @@ func TestImportPreflightAndWorkDirectoryFailureLeaveNoOutput(t *testing.T) {
 	}
 	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
 		t.Fatalf("output created after work directory failure: %v", statErr)
+	}
+}
+
+func TestLiveSnapshotReadsOnlyBytesPresentAtOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "access.log")
+	original := []byte(nginxLine("01/Jan/2024:00:00:01 +0000", "/login") + "\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := openLiveSnapshot(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.liveSnapshot.Close()
+	if file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0); err != nil {
+		t.Fatal(err)
+	} else {
+		if _, err := file.WriteString(nginxLine("01/Jan/2024:00:00:02 +0000", "/later") + "\n"); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := snapshot.liveSnapshot.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(io.LimitReader(snapshot.liveSnapshot, snapshot.size))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("snapshot = %q, want %q", got, original)
 	}
 }
 

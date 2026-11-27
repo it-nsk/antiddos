@@ -14,6 +14,7 @@ readonly web_group="antiddos-web"
 readonly binary_path="/usr/local/bin/antiddos"
 readonly config_dir="/etc/antiddos"
 readonly config_path="${config_dir}/config.json"
+readonly registration_profile_path="${config_dir}/registration.json"
 readonly environment_path="/etc/default/antiddos"
 readonly unit_path="/etc/systemd/system/${service_name}"
 readonly legacy_unit_name="antiddos-legacy.service"
@@ -39,6 +40,14 @@ use_local_build=0
 legacy_systemd=0
 web_admin_created=0
 web_admin_missing=0
+registration_preview_only=0
+registration_requested=1
+registration_preview_status="not collected"
+registration_file_saved=0
+registration_email=""
+registration_domain=""
+registration_ip=""
+registration_transfer_consent=0
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 checkout_dir="$(dirname -- "$script_dir")"
 
@@ -53,6 +62,7 @@ Options:
   --version TAG    Install a specific release, for example v0.1.0
   --no-start       Install files without enabling or starting the service
   --web            Install the localhost web UI and create the initial admin
+  --registration-preview  Show the registration questions and final summary without installing anything
   --soft-block     Install the soft-block feed and challenge checker units
   --disable-soft-block  Stop and remove the challenge checker unit
   --confirm-nginx-detached  Confirm all generated Nginx includes were removed and Nginx was reloaded
@@ -69,6 +79,165 @@ fail() {
     exit 1
 }
 
+mask_email() {
+    local value="$1"
+    local local_part domain
+    if [[ "$value" == *@* ]]; then
+        local_part="${value%@*}"
+        domain="${value#*@}"
+        printf '%s***@%s' "${local_part:0:1}" "$domain"
+    else
+        printf '***'
+    fi
+}
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\t'/\\t}"
+    value="${value//$'\r'/\\r}"
+    printf '%s' "$value"
+}
+
+valid_email() {
+    local email_pattern='^[A-Za-z0-9.!#$%&*+/=?^_`{|}~-]+@[A-Za-z0-9-]+([.][A-Za-z0-9-]+)+$'
+    [[ "$1" =~ $email_pattern ]]
+}
+
+valid_domain() {
+    local domain_pattern='^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?[.])+[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'
+    [[ "$1" =~ $domain_pattern ]]
+}
+
+valid_ipv4() {
+    local value="$1"
+    local -a octets
+    local octet
+
+    [[ "$value" =~ ^([0-9]{1,3}[.]){3}[0-9]{1,3}$ ]] || return 1
+    IFS=. read -r -a octets <<<"$value"
+    for octet in "${octets[@]}"; do
+        ((10#$octet <= 255)) || return 1
+    done
+}
+
+collect_registration_preview() {
+    local suggested_domain=""
+    local suggested_ip=""
+    local transfer_answer=""
+
+    if ! { [[ -t 0 ]] && [[ -t 1 ]]; }; then
+        registration_preview_status="skipped (non-interactive installation)"
+        return
+    fi
+
+    if command -v hostname >/dev/null 2>&1; then
+        suggested_domain="$(hostname -f 2>/dev/null || true)"
+        [[ "$suggested_domain" == "(none)" ]] && suggested_domain=""
+        suggested_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    fi
+
+    echo
+    echo "Cabinet registration preview"
+    if ((registration_preview_only)); then
+        echo "  The data is collected only for this screen: it is not saved or sent anywhere."
+    else
+        echo "  The data will be saved locally after installation; it is not sent anywhere."
+    fi
+    echo "  Enter a domain name only (for example, example.com), not the local UI URL."
+    echo "  The IP suggestion is a local interface address and may be private behind NAT."
+    while :; do
+        read -r -p "  Client email (leave blank to skip): " registration_email
+        if [[ -z "$registration_email" ]]; then
+            registration_preview_status="skipped by operator"
+            return
+        fi
+        valid_email "$registration_email" && break
+        echo "  Enter a valid email address, for example admin@example.com."
+    done
+
+    while :; do
+        read -r -p "  Server domain, without http:// or port [${suggested_domain:-not detected}]: " registration_domain
+        registration_domain="${registration_domain:-$suggested_domain}"
+        valid_domain "$registration_domain" && break
+        echo "  Enter a public domain name with a dot, for example example.com."
+    done
+
+    while :; do
+        read -r -p "  Server IPv4 [local address: ${suggested_ip:-not detected}]: " registration_ip
+        registration_ip="${registration_ip:-$suggested_ip}"
+        valid_ipv4 "$registration_ip" && break
+        echo "  Enter a valid IPv4 address, for example 203.0.113.10."
+    done
+    read -r -p "  Allow a future update to send these details to the cabinet? [y/N]: " transfer_answer
+    case "$transfer_answer" in
+        y|Y|yes|YES|Yes)
+            registration_transfer_consent=1
+            ;;
+    esac
+    registration_preview_status="collected locally only; nothing was sent"
+}
+
+save_registration_profile() {
+    local temporary created_at
+
+    ((registration_requested)) || return
+    [[ -n "$registration_email" ]] || return
+    [[ ! -L "$registration_profile_path" ]] || fail "refusing symlink registration profile path"
+    if [[ -e "$registration_profile_path" && ! -f "$registration_profile_path" ]]; then
+        fail "registration profile path is not a regular file: ${registration_profile_path}"
+    fi
+
+    temporary="$(mktemp "${registration_profile_path}.XXXXXX")"
+    created_at="$(date -u +%FT%TZ)"
+    printf '{\n  "schema_version": 1,\n  "status": "pending_local",\n  "transfer_consent": %s,\n  "saved_at": "%s",\n  "email": "%s",\n  "domain": "%s",\n  "declared_ip": "%s"\n}\n' \
+        "$([[ "$registration_transfer_consent" -eq 1 ]] && echo true || echo false)" \
+        "$created_at" \
+        "$(json_escape "$registration_email")" \
+        "$(json_escape "$registration_domain")" \
+        "$(json_escape "$registration_ip")" >"$temporary"
+    chown root:root "$temporary"
+    chmod 0600 "$temporary"
+    mv -f "$temporary" "$registration_profile_path"
+    registration_file_saved=1
+    registration_preview_status="data received and saved locally; nothing was sent"
+}
+
+print_registration_preview() {
+    ((registration_requested)) || return
+
+    echo "Cabinet registration"
+    echo "  Status: ${registration_preview_status}"
+    if [[ -n "$registration_email" ]]; then
+        echo "  Email:  $(mask_email "$registration_email")"
+        echo "  Domain: ${registration_domain:-not provided}"
+        echo "  IP:     ${registration_ip:-not provided}"
+        if ((registration_file_saved)); then
+            echo "  Saved:  ${registration_profile_path}"
+            if ((registration_transfer_consent)); then
+                echo "  Future transfer: allowed when a later installer supports registration"
+            else
+                echo "  Future transfer: not allowed"
+            fi
+        elif ((registration_preview_only)); then
+            if ((registration_transfer_consent)); then
+                echo "  Future transfer: selected for preview only; nothing was saved"
+            else
+                echo "  Future transfer: not selected"
+            fi
+        fi
+        if [[ "$registration_domain" == "localhost" ]]; then
+            echo "  Warning: localhost is local to this server; enter its public domain for registration."
+        elif [[ "$registration_domain" == *"://"* || "$registration_domain" == */* || "$registration_domain" == *:* ]]; then
+            echo "  Warning: domain must be a hostname only; do not enter a URL, path, or port."
+        fi
+        if [[ "$registration_ip" == 10.* || "$registration_ip" == 127.* || "$registration_ip" == 192.168.* || "$registration_ip" == 172.1[6-9].* || "$registration_ip" == 172.2[0-9].* || "$registration_ip" == 172.3[0-1].* || "$registration_ip" == "::1" ]]; then
+            echo "  Warning: this is a local or private IP; enter the server's public IP for registration."
+        fi
+    fi
+}
+
 while (($# > 0)); do
     case "$1" in
         --log-file)
@@ -83,6 +252,10 @@ while (($# > 0)); do
             ;;
         --web)
             install_web=1
+            shift
+            ;;
+        --registration-preview)
+            registration_preview_only=1
             shift
             ;;
         --soft-block)
@@ -118,6 +291,14 @@ while (($# > 0)); do
             ;;
     esac
 done
+
+if ((registration_preview_only)); then
+    collect_registration_preview
+    echo
+    echo "Registration preview complete"
+    print_registration_preview
+    exit 0
+fi
 
 ((EUID == 0)) || fail "run this script through sudo"
 
@@ -166,7 +347,7 @@ fi
 
 for command in curl tar sha256sum install mktemp getent groupadd useradd usermod \
     chown chmod systemctl runuser journalctl sed head tail stat dirname mv rm awk \
-    sleep uname setpriv; do
+    sleep uname setpriv date; do
     command -v "$command" >/dev/null || fail "required command is not installed: $command"
 done
 
@@ -256,6 +437,9 @@ fi
 if ((install_web)); then
     [[ -f "${build_dir}/antiddos-web.service" ]] || fail "release has no web UI; install a release containing the web feature"
 fi
+if ((registration_requested)); then
+    collect_registration_preview
+fi
 
 if ((migrate_from_nftables)); then
     echo "      Stopping ${service_name} for offline nftables migration"
@@ -344,6 +528,8 @@ else
 fi
 install -o root -g root -m 0644 "${build_dir}/config.security.example.json" "${config_dir}/config.security.example.json"
 
+save_registration_profile
+
 if ((install_web)); then
     if ! getent group "$web_group" >/dev/null; then
         groupadd --system "$web_group"
@@ -423,6 +609,8 @@ if ((start_service == 0)); then
     echo "[6/7] Service start skipped (--no-start)"
     echo "[7/7] Installation complete"
     echo "Edit ${config_path}, then run: sudo systemctl enable --now ${service_name}"
+    echo
+    print_registration_preview
     exit 0
 fi
 
@@ -523,3 +711,5 @@ if ((install_soft_block)); then
     echo "  Keys:      ${challenge_keys_path} (preserved on upgrades)"
     echo "  Nginx:     add its worker account to ${challenge_group}, then restart Nginx before enabling generated includes"
 fi
+echo
+print_registration_preview

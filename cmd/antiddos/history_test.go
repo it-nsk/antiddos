@@ -5,13 +5,17 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/it-nsk/antiddos/internal/action"
+	"github.com/it-nsk/antiddos/internal/config"
 	"github.com/it-nsk/antiddos/internal/storage"
 )
 
@@ -103,6 +107,73 @@ func TestHistoryRunRequiresTwoExplicitArchiveEnforcementFlags(t *testing.T) {
 			t.Fatalf("args %v error=%v", args, err)
 		}
 	}
+}
+
+func TestHistoryRunAppliesOneBlockForHundredArchiveEventsFromOneIP(t *testing.T) {
+	root := t.TempDir()
+	logs := filepath.Join(root, "archives")
+	if err := os.Mkdir(logs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var contents strings.Builder
+	for i := 0; i < 100; i++ {
+		fmt.Fprint(&contents, "198.51.100.77 - - [01/Jan/2024:00:00:01 +0000] \"GET /attack HTTP/1.1\" 404 12 \"-\" \"archive-test\"\n")
+	}
+	if err := os.WriteFile(filepath.Join(logs, "access.log"), []byte(contents.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	liveDB := filepath.Join(root, "antiddos.sqlite")
+	configFile := filepath.Join(root, "config.json")
+	document := `{"log_sources":{"web":{"path":"/unused/access.log","format":"nginx_combined"}},"database_path":"` + liveDB + `","block_mode":"dry_run","block_duration":"5m","engine":{"rules":[{"id":"archive-flood","action":"nftables","block_duration":"720h","log_source":"web","path_regex":"^/attack$","statuses":[404],"window":"2m","threshold":100,"group_by":"ip"}]}}`
+	if err := os.WriteFile(configFile, []byte(document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &historyTestAction{}
+	originalActions := historicalFirewallActions
+	historicalFirewallActions = func(config.Config) (action.Action, action.Action) { return fake, fake }
+	t.Cleanup(func() { historicalFirewallActions = originalActions })
+	var output bytes.Buffer
+	err := executeCommand(context.Background(), []string{
+		"history", "run", "--config", configFile, "--source", "web", "--directory", logs,
+		"--name-regex", `^access\.log$`, "--work-directory", root, "--sort-memory-bytes", "256", "--max-sort-bytes", "1048576",
+		"--apply-blocks", "--confirm-archive-blocks",
+	}, slog.Default(), &output)
+	if err != nil {
+		t.Fatalf("history run: %v\\n%s", err, output.String())
+	}
+	if fake.applied != 1 || fake.request.IP != netip.MustParseAddr("198.51.100.77") || fake.request.RuleID != "archive-flood" {
+		t.Fatalf("firewall requests = %d, request = %#v", fake.applied, fake.request)
+	}
+	if remaining := time.Until(fake.request.ExpiresAt); remaining < 719*time.Hour || remaining > 721*time.Hour {
+		t.Fatalf("block duration remaining = %s, want about 720h", remaining)
+	}
+	db, err := sql.Open("sqlite3", liveDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var blocks int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM active_blocks WHERE ip = '198.51.100.77' AND rule_id = 'archive-flood'`).Scan(&blocks); err != nil {
+		t.Fatal(err)
+	}
+	if blocks != 1 || !strings.Contains(output.String(), "Historical enforcement applied: 1 new firewall blocks") {
+		t.Fatalf("blocks=%d output=%s", blocks, output.String())
+	}
+}
+
+type historyTestAction struct {
+	applied int
+	request action.BlockRequest
+}
+
+func (testAction *historyTestAction) Apply(_ context.Context, request action.BlockRequest) action.Result {
+	testAction.applied++
+	testAction.request = request
+	return action.Result{Status: action.StatusApplied, IP: request.IP, ExpiresAt: request.ExpiresAt}
+}
+
+func (testAction *historyTestAction) Remove(context.Context, netip.Addr) action.Result {
+	return action.Result{Status: action.StatusAlreadyAbsent, IP: netip.MustParseAddr("198.51.100.77")}
 }
 
 func gzipBytes(t *testing.T, value string) []byte {

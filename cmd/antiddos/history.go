@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -45,7 +46,15 @@ Run snapshots the source parser and enabled rules from the normal config,
 analyzes all matching archives in event-time order, and atomically appends the
 backdated traffic and dry-run detections to the configured database. It never
 invokes blocking unless both --apply-blocks and --confirm-archive-blocks are set.
+
+With --snapshot-current, the selected source's active log is read through one
+open file descriptor up to its size at command start. Appends after that point
+are excluded and no duplicate snapshot file is created.
 `
+
+var historicalFirewallActions = func(cfg config.Config) (action.Action, action.Action) {
+	return &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}, &action.IPTables{BlockTCPPorts: cfg.BlockTCPPorts}
+}
 
 func historyCommand(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
@@ -85,14 +94,14 @@ func historyCommand(ctx context.Context, args []string, out io.Writer) error {
 func historyRunCommand(ctx context.Context, args []string, out io.Writer) error {
 	var configFile, sourceID, directory, nameRegex, resultPath, order, timezone, workDirectory, fromText, toText string
 	var syslogYear, maxFiles, maxLineBytes int
-	var applyBlocks, confirmArchiveBlocks bool
+	var applyBlocks, confirmArchiveBlocks, snapshotCurrent bool
 	var maxInputBytes, maxExpandedBytes, sortMemoryBytes, maxSortBytes, allowMalformed int64
 	f := flag.NewFlagSet("history run", flag.ContinueOnError)
 	f.SetOutput(out)
 	f.StringVar(&configFile, "config", configPath(), "normal AntiDDoS configuration")
 	f.StringVar(&sourceID, "source", "", "configured logical log source (optional when only one exists)")
-	f.StringVar(&directory, "directory", "", "absolute directory containing archived logs")
-	f.StringVar(&nameRegex, "name-regex", "", "Go RE2 expression matched against base filenames")
+	f.StringVar(&directory, "directory", "", "absolute directory containing archived logs (defaults beside current log with --snapshot-current)")
+	f.StringVar(&nameRegex, "name-regex", "", "Go RE2 expression matched against base filenames (defaults to numeric rotations with --snapshot-current)")
 	f.StringVar(&resultPath, "result", "", "retain the isolated result at this new absolute path")
 	f.StringVar(&workDirectory, "work-directory", "", "existing durable directory for sort files (defaults beside the configured database)")
 	f.StringVar(&order, "order", history.OrderNatural, "discovery order: natural, lexical, or first-event")
@@ -109,6 +118,7 @@ func historyRunCommand(ctx context.Context, args []string, out io.Writer) error 
 	f.StringVar(&toText, "to", "", "optional period end, exclusive (RFC3339; requires --from)")
 	f.BoolVar(&applyBlocks, "apply-blocks", false, "apply firewall blocks from historical detections (requires --confirm-archive-blocks)")
 	f.BoolVar(&confirmArchiveBlocks, "confirm-archive-blocks", false, "confirm that historical detections must block from now")
+	f.BoolVar(&snapshotCurrent, "snapshot-current", false, "include a bounded read of the selected source's active log at its size when the command starts")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -127,10 +137,56 @@ func historyRunCommand(ctx context.Context, args []string, out io.Writer) error 
 		return err
 	}
 	if sourceID == "" {
+		if snapshotCurrent && len(cfg.LogSources) > 1 {
+			if resultPath != "" {
+				return fmt.Errorf("--result requires an explicit --source when analyzing multiple sources")
+			}
+			for _, source := range cfg.LogSources {
+				sourceArgs := append(append([]string(nil), args...), "--source", source.ID)
+				if err := historyRunCommand(ctx, sourceArgs, out); err != nil {
+					if strings.Contains(err.Error(), "no supported events were parsed") {
+						fmt.Fprintf(out, "Skipped source %s: no supported events in its current log/rotations.\n", source.ID)
+						continue
+					}
+					return err
+				}
+			}
+			return nil
+		}
 		if len(cfg.LogSources) != 1 {
 			return fmt.Errorf("--source is required when the config has %d log sources", len(cfg.LogSources))
 		}
 		sourceID = cfg.LogSources[0].ID
+	}
+	currentSnapshotPath := ""
+	if snapshotCurrent {
+		var selectedSource *config.LogSourceConfig
+		for index := range cfg.LogSources {
+			if cfg.LogSources[index].ID == sourceID {
+				selectedSource = &cfg.LogSources[index]
+				break
+			}
+		}
+		if selectedSource == nil {
+			return fmt.Errorf("unknown configured source %q", sourceID)
+		}
+		currentSnapshotPath = selectedSource.Path
+		if currentSnapshotPath == "" {
+			return fmt.Errorf("source %q has no active path to snapshot", sourceID)
+		}
+		if directory == "" {
+			directory = filepath.Dir(currentSnapshotPath)
+		}
+		if nameRegex == "" {
+			nameRegex = "^" + regexp.QuoteMeta(filepath.Base(currentSnapshotPath)) + `\.[0-9]+(\.gz)?$`
+		}
+		if (selectedSource.Format == config.LogFormatSyslogSSHD || selectedSource.Format == config.LogFormatNetfilterLog) && timezone == "" {
+			timezone = time.Local.String()
+			if syslogYear == 0 {
+				syslogYear = time.Now().Year()
+			}
+			fmt.Fprintf(out, "Current-log defaults: timezone=%s syslog-year=%d.\n", timezone, syslogYear)
+		}
 	}
 	if workDirectory == "" {
 		workDirectory = filepath.Dir(cfg.DatabasePath)
@@ -160,13 +216,21 @@ func historyRunCommand(ctx context.Context, args []string, out io.Writer) error 
 	}
 	sort.Strings(ruleIDs)
 	fmt.Fprintf(out, "Historical analysis: source=%s files=%s/%s rules=%s target=%s\n", sourceID, directory, nameRegex, strings.Join(ruleIDs, ","), cfg.DatabasePath)
-	fmt.Fprintln(out, "Enforcement is disabled: no blocks, soft-block decisions, or notifications will be created.")
+	if applyBlocks {
+		fmt.Fprintln(out, "Historical enforcement is enabled: eligible historical detections will create firewall blocks from now.")
+	} else {
+		fmt.Fprintln(out, "Enforcement is disabled: no blocks, soft-block decisions, or notifications will be created.")
+	}
+	if snapshotCurrent {
+		fmt.Fprintf(out, "Current log snapshot enabled: %s (streamed to its starting byte boundary; no copy is created).\n", currentSnapshotPath)
+	}
 	result, err := history.Import(ctx, history.ImportOptions{
 		Config: cfg, SourceID: sourceID, Directory: directory, NameRegex: nameRegex, OutputPath: resultPath,
 		Order: order, Location: location, SyslogYear: syslogYear, MaxFiles: maxFiles,
 		MaxInputBytes: maxInputBytes, MaxExpandedBytes: maxExpandedBytes, MaxLineBytes: maxLineBytes,
 		SortMemoryBytes: sortMemoryBytes, MaxSortBytes: maxSortBytes, TempDirectory: workDirectory, AllowMalformed: allowMalformed,
 		From: from, To: to,
+		CurrentSnapshotPath: currentSnapshotPath,
 		Progress: func(progress history.ImportProgress) {
 			if progress.Stage == "read-sort" {
 				fmt.Fprintf(out, "Read/sorted files: %d; lines: %d; parsed: %d\n", progress.Files, progress.Lines, progress.Parsed)
@@ -180,11 +244,19 @@ func historyRunCommand(ctx context.Context, args []string, out io.Writer) error 
 	}
 	published, err := history.PublishToDatabase(ctx, result.OutputPath, cfg.DatabasePath, result.ImportID)
 	if err != nil {
+		if applyBlocks && strings.Contains(err.Error(), "overlaps existing source traffic") {
+			count, blockErr := applyHistoricalBlocks(ctx, cfg, result.ImportID, result.OutputPath)
+			if blockErr != nil {
+				return blockErr
+			}
+			fmt.Fprintf(out, "Historical traffic/detections were not republished because they overlap existing history; %d new firewall blocks were applied from the isolated result.\n", count)
+			return nil
+		}
 		fmt.Fprintf(out, "Isolated result retained for review/retry: %s (import %s)\n", result.OutputPath, result.ImportID)
 		return fmt.Errorf("publish historical analysis: %w", err)
 	}
 	if applyBlocks {
-		count, err := applyHistoricalBlocks(ctx, cfg, result.ImportID)
+		count, err := applyHistoricalBlocks(ctx, cfg, result.ImportID, "")
 		if err != nil {
 			return err
 		}
@@ -224,13 +296,21 @@ func reserveHistoryResultPath(directory string) (string, error) {
 	return path, nil
 }
 
-func applyHistoricalBlocks(ctx context.Context, cfg config.Config, importID string) (int, error) {
+func applyHistoricalBlocks(ctx context.Context, cfg config.Config, importID, detectionDatabase string) (int, error) {
 	store, err := storage.Open(cfg.DatabasePath)
 	if err != nil {
 		return 0, err
 	}
 	defer store.Close()
-	detections, err := store.HistoricalDetectionsForImport(ctx, importID)
+	detectionStore := store
+	if detectionDatabase != "" {
+		detectionStore, err = storage.Open(detectionDatabase)
+		if err != nil {
+			return 0, err
+		}
+		defer detectionStore.Close()
+	}
+	detections, err := detectionStore.HistoricalDetectionsForImport(ctx, importID)
 	if err != nil {
 		return 0, fmt.Errorf("read historical detections: %w", err)
 	}
@@ -238,8 +318,7 @@ func applyHistoricalBlocks(ctx context.Context, cfg config.Config, importID stri
 	for _, rule := range cfg.Engine.Rules {
 		rules[rule.ID] = rule
 	}
-	nft := &action.NFTables{BlockTCPPorts: cfg.BlockTCPPorts}
-	ipt := &action.IPTables{BlockTCPPorts: cfg.BlockTCPPorts}
+	nft, ipt := historicalFirewallActions(cfg)
 	now := time.Now()
 	applied := 0
 	for _, detection := range detections {
