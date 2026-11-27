@@ -155,3 +155,8 @@
 .sidebar-account .nav-link { display: flex; align-items: center; }
 .sidebar-account .nav-icon { display: flex; justify-content: center; flex: 0 0 1.5rem; }
 .sidebar-account .nav-link > span { padding-inline-start: .5rem; }
+.block-submit { min-width: 2.5rem; height: 2.375rem; margin-top: 1.9rem; }
+.block-duration-controls { display: flex; gap: .5rem; align-items: center; }
+.block-duration-controls select { min-width: 0; flex: 1 1 auto; }
+.block-duration-controls input { flex: 0 0 46%; min-width: 0; }
+@media (max-width: 991.98px) { .block-submit { margin-top: 0; } }

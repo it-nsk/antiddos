@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -48,6 +49,8 @@ type Backend interface {
 	ChallengeMetrics(context.Context, time.Time, time.Time, int) ([]challengeadmin.Metric, error)
 	SoftBlocks(context.Context, int) ([]storage.SoftBlockLease, error)
 	ReconcileBlocks(context.Context) error
+	Unblock(context.Context, netip.Addr) error
+	ManualBlock(context.Context, netip.Addr, string, time.Time) error
 }
 
 type Server struct {
@@ -119,6 +122,8 @@ func New(o Options, auth *webauth.Store, backend Backend, logger *slog.Logger) (
 	mux.HandleFunc("POST /api/logout", s.protected(false, s.logout))
 	mux.HandleFunc("GET /api/dashboard", s.protected(false, s.dashboard))
 	mux.HandleFunc("POST /api/blocks/reconcile", s.protected(true, s.reconcileBlocks))
+	mux.HandleFunc("POST /api/blocks/unblock", s.protected(true, s.unblock))
+	mux.HandleFunc("POST /api/blocks", s.protected(true, s.manualBlock))
 	mux.HandleFunc("GET /api/challenge/status", s.protected(false, s.challengeStatus))
 	mux.HandleFunc("GET /api/challenge/metrics", s.protected(false, s.challengeMetrics))
 	mux.HandleFunc("GET /api/soft-blocks", s.protected(false, s.softBlocks))
@@ -540,6 +545,46 @@ func (s *Server) reconcileBlocks(w http.ResponseWriter, r *http.Request, _ webau
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reconciled"})
+}
+func (s *Server) unblock(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
+	var input struct {
+		IP string `json:"ip"`
+	}
+	if err := body(w, r, &input); err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	ip, err := netip.ParseAddr(input.IP)
+	if err != nil {
+		fail(w, 400, "Invalid IP address")
+		return
+	}
+	if err := s.backend.Unblock(r.Context(), ip.Unmap()); err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "unblocked", "ip": ip.Unmap().String()})
+}
+func (s *Server) manualBlock(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
+	var input struct {
+		IP        string    `json:"ip"`
+		RuleID    string    `json:"rule_id"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if err := body(w, r, &input); err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	ip, err := netip.ParseAddr(input.IP)
+	if err != nil || input.RuleID == "" || input.ExpiresAt.IsZero() || !input.ExpiresAt.After(time.Now()) {
+		fail(w, 400, "Invalid manual block request")
+		return
+	}
+	if err := s.backend.ManualBlock(r.Context(), ip.Unmap(), input.RuleID, input.ExpiresAt); err != nil {
+		s.internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "applied", "ip": ip.Unmap().String(), "rule_id": input.RuleID, "expires_at": input.ExpiresAt})
 }
 func (s *Server) softBlocks(w http.ResponseWriter, r *http.Request, _ webauth.Session) {
 	if r.URL.RawQuery != "" {

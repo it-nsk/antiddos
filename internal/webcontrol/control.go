@@ -11,11 +11,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
 	"time"
 
+	"github.com/it-nsk/antiddos/internal/action"
 	"github.com/it-nsk/antiddos/internal/challengeadmin"
 	"github.com/it-nsk/antiddos/internal/configservice"
 	"github.com/it-nsk/antiddos/internal/storage"
@@ -42,6 +44,8 @@ type Service struct {
 	Status        Status
 	Challenge     *challengeadmin.Client
 	Reconcile     func(context.Context) error
+	Unblock       func(context.Context, netip.Addr) action.Result
+	ManualBlock   func(context.Context, netip.Addr, string, time.Time) action.Result
 	OnConfigSaved func(context.Context, configservice.Document) error
 }
 
@@ -179,6 +183,60 @@ func (s *Service) handler() http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "reconciled"})
+	})
+	mux.HandleFunc("POST /v1/blocks/unblock", func(w http.ResponseWriter, r *http.Request) {
+		if s.Unblock == nil {
+			writeError(w, http.StatusServiceUnavailable, fmt.Errorf("unblock unavailable"))
+			return
+		}
+		var input struct {
+			IP string `json:"ip"`
+		}
+		if err := decodeBody(w, r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		ip, err := netip.ParseAddr(input.IP)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid IP address"))
+			return
+		}
+		result := s.Unblock(r.Context(), ip.Unmap())
+		if result.Status != action.StatusRemoved && result.Status != action.StatusAlreadyAbsent && result.Status != action.StatusWouldRemove {
+			writeError(w, http.StatusServiceUnavailable, result.Err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": string(result.Status), "ip": ip.Unmap().String(), "reason": result.Reason})
+	})
+	mux.HandleFunc("POST /v1/blocks", func(w http.ResponseWriter, r *http.Request) {
+		if s.ManualBlock == nil {
+			writeError(w, http.StatusServiceUnavailable, fmt.Errorf("manual blocking unavailable"))
+			return
+		}
+		var input struct {
+			IP        string    `json:"ip"`
+			RuleID    string    `json:"rule_id"`
+			ExpiresAt time.Time `json:"expires_at"`
+		}
+		if err := decodeBody(w, r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		ip, err := netip.ParseAddr(input.IP)
+		if err != nil || input.RuleID == "" || input.ExpiresAt.IsZero() {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid manual block request"))
+			return
+		}
+		result := s.ManualBlock(r.Context(), ip.Unmap(), input.RuleID, input.ExpiresAt)
+		if result.Status != action.StatusApplied && result.Status != action.StatusAlreadyActive {
+			err := result.Err
+			if err == nil {
+				err = fmt.Errorf("selected rule has no active firewall backend")
+			}
+			writeError(w, http.StatusServiceUnavailable, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": string(result.Status), "ip": ip.Unmap().String(), "rule_id": input.RuleID, "expires_at": input.ExpiresAt})
 	})
 	return mux
 }
@@ -337,6 +395,15 @@ func (c *Client) SaveRules(ctx context.Context, update configservice.Update) (Co
 func (c *Client) ReconcileBlocks(ctx context.Context) error {
 	var result map[string]string
 	return c.request(ctx, http.MethodPost, "/v1/blocks/reconcile", nil, &result)
+}
+func (c *Client) Unblock(ctx context.Context, ip netip.Addr) error {
+	var result struct{ Status, IP, Reason string }
+	return c.request(ctx, http.MethodPost, "/v1/blocks/unblock", map[string]string{"ip": ip.Unmap().String()}, &result)
+}
+
+func (c *Client) ManualBlock(ctx context.Context, ip netip.Addr, ruleID string, expiresAt time.Time) error {
+	var result map[string]any
+	return c.request(ctx, http.MethodPost, "/v1/blocks", map[string]any{"ip": ip.Unmap().String(), "rule_id": ruleID, "expires_at": expiresAt}, &result)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

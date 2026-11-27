@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,7 +43,9 @@ func (b *testBackend) SoftBlocks(ctx context.Context, limit int) ([]storage.Soft
 func (b *testBackend) ChallengeMetrics(context.Context, time.Time, time.Time, int) ([]challengeadmin.Metric, error) {
 	return []challengeadmin.Metric{{Site: "main", Reason: "issued", Count: 3}}, nil
 }
-func (b *testBackend) ReconcileBlocks(context.Context) error { b.reconciles++; return nil }
+func (b *testBackend) ReconcileBlocks(context.Context) error                            { b.reconciles++; return nil }
+func (b *testBackend) Unblock(context.Context, netip.Addr) error                        { return nil }
+func (b *testBackend) ManualBlock(context.Context, netip.Addr, string, time.Time) error { return nil }
 
 func TestReconcileBlocksIsAdminOnly(t *testing.T) {
 	s := fixtureServer(t)

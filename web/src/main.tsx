@@ -1014,7 +1014,7 @@ function Workspace({
                 </details>
               </section>
             )}
-            <Blocks data={data} rules={config?.config.rules ?? []} admin={admin} onReconcile={() => api("blocks/reconcile",{method:"POST",headers:{"X-CSRF-Token":session.csrf}}).then(()=>setRefresh(v=>v+1)).catch(report)} />
+            <Blocks data={data} rules={config?.config.rules ?? []} admin={admin} onReconcile={() => api("blocks/reconcile",{method:"POST",headers:{"X-CSRF-Token":session.csrf}}).then(()=>setRefresh(v=>v+1)).catch(report)} onUnblock={(ip) => api("blocks/unblock",{method:"POST",headers:{"X-CSRF-Token":session.csrf},body:JSON.stringify({ip})}).then(()=>setRefresh(v=>v+1)).catch(report)} />
             <section className="panel">
               <details>
                 <summary>Все показатели трафика по интервалам</summary>
@@ -1064,7 +1064,7 @@ function Workspace({
         )}
         {page === "detections" && data && (
           <>
-            <Blocks data={data} rules={config?.config.rules ?? []} admin={admin} onReconcile={() => api("blocks/reconcile",{method:"POST",headers:{"X-CSRF-Token":session.csrf}}).then(()=>setRefresh(v=>v+1)).catch(report)} />
+            <Blocks data={data} rules={config?.config.rules ?? []} admin={admin} onReconcile={() => api("blocks/reconcile",{method:"POST",headers:{"X-CSRF-Token":session.csrf}}).then(()=>setRefresh(v=>v+1)).catch(report)} onUnblock={(ip) => api("blocks/unblock",{method:"POST",headers:{"X-CSRF-Token":session.csrf},body:JSON.stringify({ip})}).then(()=>setRefresh(v=>v+1)).catch(report)} />
             <section className="panel">
               <div className="panel-head">
                 <h2>
@@ -1963,7 +1963,7 @@ function SoftBlockPanel({ rows }: { rows: SoftBlock[] | null }) {
     </section>
   );
 }
-function Blocks({ data, rules, admin, onReconcile }: { data: Dashboard; rules: Config["rules"]; admin:boolean; onReconcile:()=>void }) {
+function Blocks({ data, rules, admin, onReconcile, onUnblock }: { data: Dashboard; rules: Config["rules"]; admin:boolean; onReconcile:()=>void; onUnblock:(ip:string)=>void }) {
   const sourceByRule = new Map(rules.map((rule) => [rule.id, rule.log_source]));
   return (
     <section className="panel">
@@ -1986,6 +1986,7 @@ function Blocks({ data, rules, admin, onReconcile }: { data: Dashboard; rules: C
                 <th>Заблокирован</th>
                 <th>Истекает</th>
                 <th>Осталось</th>
+                {admin && <th aria-label="Действия"></th>}
               </tr>
             </thead>
             <tbody>
@@ -2000,6 +2001,7 @@ function Blocks({ data, rules, admin, onReconcile }: { data: Dashboard; rules: C
                   <td>{dt(b.started_at)}</td>
                   <td>{dt(b.expires_at)}</td>
                   <td>{Math.max(0, b.expires_at - data.updated_at)} с</td>
+                  {admin && <td><button type="button" className="block-remove" title={`Снять блокировку ${b.ip}`} aria-label={`Снять блокировку ${b.ip}`} onClick={() => onUnblock(b.ip)}>×</button></td>}
                 </tr>
               ))}
             </tbody>

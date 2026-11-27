@@ -59,6 +59,29 @@ func (manager *Manager) SetRepeatRules(rules map[string]RepeatRule) {
 
 type ReconcileResult struct{ Imported, Removed, Active int }
 
+func (manager *Manager) ManualBlock(ctx context.Context, ip netip.Addr, ruleID string, expiresAt time.Time) action.Result {
+	if !ip.IsValid() || ruleID == "" || !expiresAt.After(time.Now()) {
+		return action.Result{Status: action.StatusFailed, IP: ip, Err: fmt.Errorf("invalid manual block request")}
+	}
+	ip = ip.Unmap()
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.whitelist != nil && manager.whitelist(ip, ruleID) {
+		return action.Result{Status: action.StatusFailed, IP: ip, Err: fmt.Errorf("address is whitelisted for rule %q", ruleID)}
+	}
+	result := manager.action.Apply(ctx, action.BlockRequest{IP: ip, RuleID: ruleID, ExpiresAt: expiresAt})
+	if result.Status != action.StatusApplied && result.Status != action.StatusAlreadyActive {
+		return result
+	}
+	if result.Status == action.StatusApplied {
+		if err := manager.store.RecordBlock(ctx, ip, ruleID, time.Now(), expiresAt); err != nil {
+			return action.Result{Status: action.StatusFailed, IP: ip, ExpiresAt: expiresAt, Err: fmt.Errorf("persist manual block: %w", err)}
+		}
+	}
+	manager.active[ip] = blockpolicy.ActiveBlock{IP: ip, ExpiresAt: expiresAt}
+	return result
+}
+
 func New(policy *blockpolicy.Policy, duration time.Duration, blockAction action.Action, store *storage.Store) (*Manager, error) {
 	if policy == nil || blockAction == nil || store == nil {
 		return nil, fmt.Errorf("block manager requires policy, action, and storage")

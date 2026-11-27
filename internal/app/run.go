@@ -136,6 +136,11 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 				}
 			}
 		}
+		if backends[config.RuleActionNFTables] != nil {
+			byRule["manual"] = backends[config.RuleActionNFTables]
+		} else if backends[config.RuleActionIPTables] != nil {
+			byRule["manual"] = backends[config.RuleActionIPTables]
+		}
 		blockAction = action.Router{ByRule: byRule, All: all}
 	}
 	analysisConfigID := engine.AnalysisConfigID(revisions)
@@ -285,11 +290,13 @@ func Run(ctx context.Context, opts RunOptions, logger *slog.Logger) error {
 		}
 		defer webReader.Close()
 		service := &webcontrol.Service{
-			Config:    &configservice.Service{Path: opts.Config},
-			Stats:     webReader,
-			Challenge: &challengeadmin.Client{},
-			Status:    webcontrol.Status{ConfigRevision: webConfig.Revision, StartedAt: time.Now(), BlockMode: cfg.BlockMode},
-			Reconcile: manager.ReconcileFirewall,
+			Config:      &configservice.Service{Path: opts.Config},
+			Stats:       webReader,
+			Challenge:   &challengeadmin.Client{},
+			Status:      webcontrol.Status{ConfigRevision: webConfig.Revision, StartedAt: time.Now(), BlockMode: cfg.BlockMode},
+			Reconcile:   manager.ReconcileFirewall,
+			Unblock:     manager.Unblock,
+			ManualBlock: manager.ManualBlock,
 			OnConfigSaved: func(ctx context.Context, document configservice.Document) error {
 				manager.SetWhitelist(whitelistFromDocument(document))
 				if !config.UsesFirewall(cfg) {
